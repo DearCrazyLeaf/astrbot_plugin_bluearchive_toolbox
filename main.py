@@ -4,14 +4,18 @@ import asyncio
 import hashlib
 import json
 import re
+import subprocess
+import sys
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.message_event_result import MessageChain
 
@@ -24,15 +28,60 @@ except ImportError:
 from .api_clients.arona_client import AronaAmbiguousError, AronaClient
 from .api_clients.cache_manager import ImageCacheManager
 from .api_clients.gamekee import GameKeeClient
-from .api_clients.schaledb_client import SchaleDBClient, SchaleDBError
+from .api_clients.schaledb_client import (
+    SchaleDBClient,
+    SchaleDBError,
+    StudentAmbiguousError,
+)
 from .poll_archive import PollArchive
 from .renderers.card import BirthdayCard, CardPoolCard, ScheduleCard
 from .renderers.card_fonts import prepare_card_fonts
-from .renderers.html_renderer import configure_font_cache_dir
+from .renderers.html_renderer import configure_font_cache_dir, is_chromium_installed
 from .renderers.student_detail import render_student_detail
 
 PLUGIN_ID = "astrbot_plugin_bluearchive_toolbox"
 LOG_PREFIX = "[Ba ToolBox]"
+STUDENT_CHOICE_TIMEOUT = 120
+MAX_STUDENT_CHOICES = 10
+STUDENT_CHOICE_FALLBACK_FACE_POOL = (
+    "5",
+    "9",
+    "10",
+    "14",
+    "18",
+    "21",
+    "23",
+    "25",
+    "27",
+    "29",
+    "32",
+    "49",
+    "53",
+    "55",
+    "59",
+    "60",
+    "63",
+    "66",
+    "74",
+    "79",
+    "89",
+    "96",
+    "99",
+    "100",
+    "105",
+    "120",
+    "123",
+    "124",
+    "129",
+    "144",
+    "147",
+    "171",
+    "175",
+    "179",
+    "182",
+    "183",
+    "201",
+)
 
 
 class BAToolbox(Star):
@@ -57,6 +106,9 @@ class BAToolbox(Star):
         self._poll_task: asyncio.Task | None = None
         self._active_menus: dict[str, dict[str, Any]] = {}
         self._menu_debounce: dict[tuple[str, str, str], float] = {}
+        self._pending_student_queries: dict[str, dict[str, Any]] = {}
+        self._student_choices_by_token: dict[str, dict[str, Any]] = {}
+        self._student_candidate_menus: dict[str, dict[str, Any]] = {}
         # 图片缓存管理器
         cache_cfg = self.config.get("cache_settings", {})
         max_items = int(cache_cfg.get("max_items", 200))
@@ -89,7 +141,8 @@ class BAToolbox(Star):
         if self._schaledb_client is None:
             self._schaledb_client = SchaleDBClient(
                 cache_dir=self._cache_dir / "schaledb",
-                base_url=str(self._get_setting("schaledb_base_url") or "").strip() or None,
+                base_url=str(self._get_setting("schaledb_base_url") or "").strip()
+                or None,
             )
         return self._schaledb_client
 
@@ -112,6 +165,14 @@ class BAToolbox(Star):
     # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
+        try:
+            await self._ensure_playwright_chromium()
+        except Exception as exc:
+            logger.error(
+                f"{LOG_PREFIX}[renderer] Chromium 自动安装失败；"
+                "卡片渲染暂不可用，请检查网络和写入权限，"
+                f"或手动运行 `{sys.executable} -m playwright install chromium`：{exc}"
+            )
         if self._poll_task is None or self._poll_task.done():
             self._poll_task = asyncio.create_task(self._poll_loop())
         if not bool(self._get_setting("download_full_font", False)):
@@ -131,6 +192,38 @@ class BAToolbox(Star):
             logger.warning(
                 f"{LOG_PREFIX}[fonts] 无法准备 {filename}: {error}；将回退到插件内置字体"
             )
+
+    async def _ensure_playwright_chromium(self) -> None:
+        if await asyncio.to_thread(is_chromium_installed):
+            logger.info(f"{LOG_PREFIX}[renderer] Playwright Chromium 已安装")
+            return
+
+        logger.info(
+            f"{LOG_PREFIX}[renderer] 未检测到 Playwright Chromium，正在自动安装"
+        )
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [
+                sys.executable,
+                "-m",
+                "playwright",
+                "install",
+                "chromium",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=False,
+        )
+        if result.returncode:
+            details = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(
+                f"安装命令退出码 {result.returncode}"
+                + (f"：{details[-2000:]}" if details else "")
+            )
+        if not await asyncio.to_thread(is_chromium_installed):
+            raise RuntimeError("安装命令已结束，但仍未找到 Chromium 可执行文件")
+        logger.info(f"{LOG_PREFIX}[renderer] Playwright Chromium 自动安装完成")
 
     async def terminate(self) -> None:
         if self._poll_task and not self._poll_task.done():
@@ -189,6 +282,57 @@ class BAToolbox(Star):
     def _store_card(self, card_bytes: bytes) -> Path:
         return self.image_cache.put(hashlib.sha256(card_bytes).hexdigest(), card_bytes)
 
+    def _poll_push_targets(self) -> list[str]:
+        configured = self._get_setting("umo_groups", [])
+        if not isinstance(configured, (list, tuple)):
+            return []
+
+        targets = []
+        for entry in configured:
+            if not isinstance(entry, str):
+                continue
+            umo, separator, region = entry.rpartition(":")
+            if (
+                separator
+                and region.strip().lower() in ("cn", "global", "jp", "all")
+                and umo.strip()
+            ):
+                parts = umo.strip().split(":", 2)
+                if len(parts) == 3 and parts[1] == "GroupMessage":
+                    targets.append(umo.strip())
+        return list(dict.fromkeys(targets))
+
+    async def _push_poll_card(
+        self, category: str, card_bytes: bytes, targets: list[str]
+    ) -> list[dict[str, str]]:
+        results = []
+        for target in targets:
+            try:
+                sent = await self.context.send_message(
+                    session=target,
+                    message_chain=MessageChain([Image.fromBytes(card_bytes)]),
+                )
+                if not sent:
+                    raise RuntimeError("未找到可用的平台会话")
+            except Exception as exc:
+                self._log_warn(
+                    "poll",
+                    "failed to push polling card",
+                    category=category,
+                    target=target,
+                    error=exc,
+                )
+                results.append(
+                    {"target": target, "status": "failed", "error": str(exc)[:500]}
+                )
+            else:
+                results.append({"target": target, "status": "sent", "error": ""})
+        return results
+
+    @staticmethod
+    async def _render_in_thread(render: Callable[..., bytes], *args: Any) -> bytes:
+        return await asyncio.to_thread(render, *args)
+
     async def _poll_loop(self) -> None:
         while True:
             try:
@@ -197,14 +341,17 @@ class BAToolbox(Star):
                     if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", poll_time):
                         now = datetime.now().astimezone()
                         archive_date = now.date().isoformat()
-                        if (
-                            now.strftime("%H:%M") >= poll_time
-                            and not self.poll_archive.has_entries(archive_date)
+                        if now.strftime(
+                            "%H:%M"
+                        ) >= poll_time and not self.poll_archive.has_entries(
+                            archive_date
                         ):
                             await self._run_daily_poll(now)
                     else:
                         self._log_warn(
-                            "poll", "invalid poll time; daily polling skipped", value=poll_time
+                            "poll",
+                            "invalid poll time; daily polling skipped",
+                            value=poll_time,
                         )
             except asyncio.CancelledError:
                 raise
@@ -218,7 +365,9 @@ class BAToolbox(Star):
         run_id = poll_at.strftime("%Y%m%dT%H%M%S")
         region = str(self._get_setting("poll_region", "all")).strip().lower()
         if region not in ("cn", "global", "jp", "all"):
-            self._log_warn("poll", "invalid poll region; using all servers", value=region)
+            self._log_warn(
+                "poll", "invalid poll region; using all servers", value=region
+            )
             region = "all"
         configured_categories = self._get_setting(
             "poll_categories", ["schedule", "birthday", "pool"]
@@ -241,10 +390,12 @@ class BAToolbox(Star):
         except (TypeError, ValueError, OSError) as exc:
             self._log_warn("poll", "archive retention cleanup failed", error=exc)
 
+        push_targets = self._poll_push_targets()
         for category in categories:
             card_bytes = None
             item_count = 0
             error = None
+            delivery_results = []
             try:
                 card_bytes, item_count = await self._render_poll_card(category, region)
             except Exception as exc:
@@ -264,7 +415,19 @@ class BAToolbox(Star):
                 item_count=item_count,
                 image=card_bytes,
                 error=error,
+                delivery_results=delivery_results,
+                has_push_targets=bool(push_targets),
             )
+            if card_bytes is not None and push_targets:
+                delivery_results = await self._push_poll_card(
+                    category, card_bytes, push_targets
+                )
+                self.poll_archive.update_delivery(
+                    archive_date=archive_date,
+                    category=category,
+                    run_id=run_id,
+                    delivery_results=delivery_results,
+                )
         self._log_debug(
             "poll",
             "daily card polling completed",
@@ -278,7 +441,8 @@ class BAToolbox(Star):
             events = await self.gamekee.get_activity_calendar(region)
             if self.gamekee.last_error:
                 raise RuntimeError(self.gamekee.last_error)
-            return ScheduleCard(events=events, region=region).render(), len(events)
+            card = ScheduleCard(events=events, region=region)
+            return await self._render_in_thread(card.render), len(events)
 
         if category == "pool":
             pools = await self.gamekee.get_card_pools(region)
@@ -299,12 +463,8 @@ class BAToolbox(Star):
             except SchaleDBError as exc:
                 self._log_warn("poll", "student portraits unavailable", error=exc)
                 student_icons = {}
-            return (
-                CardPoolCard(
-                    pools=pools, region=region, student_icons=student_icons
-                ).render(),
-                len(pools),
-            )
+            card = CardPoolCard(pools=pools, region=region, student_icons=student_icons)
+            return await self._render_in_thread(card.render), len(pools)
 
         if category == "birthday":
             language = str(self._get_setting("student_data_language") or "cn")
@@ -334,12 +494,8 @@ class BAToolbox(Star):
                 if (student_id := student_ids.get(name)) is not None
                 and str(student_id) in icons_by_id
             }
-            return (
-                BirthdayCard(
-                    students=students, student_icons=student_icons
-                ).render(),
-                len(birthdays),
-            )
+            card = BirthdayCard(students=students, student_icons=student_icons)
+            return await self._render_in_thread(card.render), len(birthdays)
 
         raise ValueError(f"Unknown polling category: {category}")
 
@@ -349,24 +505,56 @@ class BAToolbox(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def router(self, event: AstrMessageEvent):
+        self._cleanup_student_choices()
         raw_message = self._menu_raw_message(event)
-        if raw_message and raw_message.get("_ba_menu_internal"):
+        if raw_message and raw_message.get("_ba_student_choice_token"):
+            token = str(raw_message["_ba_student_choice_token"])
+            choice = self._student_choices_by_token.get(token)
+            if choice:
+                action = raw_message.get("_ba_student_choice_action")
+                actor_id = str(raw_message.get("_ba_student_choice_actor_id") or "")
+                if (
+                    actor_id
+                    and str(getattr(event, "get_sender_id", lambda: "")()) == actor_id
+                ):
+                    async for result in self._finish_student_choice(
+                        event,
+                        choice,
+                        action,
+                    ):
+                        yield result
             return
-        if raw_message and await self._handle_menu_reaction(event, raw_message):
+
+        is_internal_menu_command = bool(
+            raw_message and raw_message.get("_ba_menu_internal")
+        )
+        if (
+            raw_message
+            and not is_internal_menu_command
+            and await self._handle_menu_reaction(event, raw_message)
+        ):
             return
 
         msg = event.message_str.strip()
         group_id = str(event.get_group_id() or "")
+        user_id = str(event.get_sender_id() or "")
         menu_settings = self._menu_settings()
         menu_keywords = menu_settings.get("menu_keywords", ["菜单", "ba菜单"])
         if isinstance(menu_keywords, str):
             menu_keywords = [menu_keywords]
-        if group_id and msg.lower().lstrip("/").strip() in {
-            str(keyword).strip().lower().lstrip("/")
-            for keyword in menu_keywords
-            if str(keyword).strip()
-        }:
-            if menu_settings.get("menu_repeat_block", True) and self._active_menu_for_group(group_id):
+        if (
+            not is_internal_menu_command
+            and group_id
+            and msg.lower().lstrip("/").strip()
+            in {
+                str(keyword).strip().lower().lstrip("/")
+                for keyword in menu_keywords
+                if str(keyword).strip()
+            }
+        ):
+            if menu_settings.get(
+                "menu_repeat_block", True
+            ) and self._active_menu_for_group(group_id):
                 yield event.plain_result(
                     str(
                         menu_settings.get(
@@ -381,7 +569,22 @@ class BAToolbox(Star):
             self._stop_menu_event(event)
             return
 
-        menu_selection = self._match_active_menu_item(group_id, msg) if group_id else None
+        if not is_internal_menu_command and user_id:
+            reply_to_id = self._reply_to_message_id(event, raw_message)
+            choice = self._student_candidate_menus.get(reply_to_id or "")
+            if choice and choice["user_id"] != user_id:
+                choice = None
+            action = self._match_student_choice(choice, msg) if choice else None
+            if choice and action is not None:
+                async for result in self._finish_student_choice(event, choice, action):
+                    yield result
+                return
+
+        menu_selection = (
+            self._match_active_menu_item(group_id, msg)
+            if group_id and not is_internal_menu_command and not msg.startswith("/")
+            else None
+        )
         if menu_selection:
             menu_data, item = menu_selection
             user_id = str(event.get_sender_id() or "")
@@ -454,6 +657,262 @@ class BAToolbox(Star):
         settings = self.config.get("menu_settings", {})
         return settings if isinstance(settings, dict) else {}
 
+    def _student_choice_settings(self) -> dict[str, Any]:
+        settings = self.config.get("student_choice_settings", {})
+        return settings if isinstance(settings, dict) else {}
+
+    def _student_choice_timeout(self) -> int:
+        try:
+            timeout = int(
+                self._student_choice_settings().get(
+                    "timeout_seconds", STUDENT_CHOICE_TIMEOUT
+                )
+            )
+        except (TypeError, ValueError):
+            timeout = STUDENT_CHOICE_TIMEOUT
+        return max(10, min(timeout, 3600))
+
+    def _student_choice_max_active_menus(self) -> int:
+        try:
+            limit = int(self._student_choice_settings().get("max_active_menus", 3))
+        except (TypeError, ValueError):
+            limit = 3
+        return max(1, min(limit, 3))
+
+    def _cleanup_student_choices(self) -> None:
+        now = time.time()
+        expired = [
+            token
+            for token, choice in self._pending_student_queries.items()
+            if now - choice["created_at"]
+            > choice.get("timeout_seconds", self._student_choice_timeout())
+        ]
+        for token in expired:
+            self._close_student_choice(token)
+
+    def _close_student_choice(self, token: str) -> None:
+        choice = self._pending_student_queries.pop(token, None)
+        if not choice:
+            return
+        self._student_choices_by_token.pop(token, None)
+        message_id = choice.get("message_id")
+        if message_id:
+            self._student_candidate_menus.pop(message_id, None)
+
+    @staticmethod
+    def _reply_to_message_id(
+        event: AstrMessageEvent, raw_message: dict[str, Any] | None = None
+    ) -> str | None:
+        message_obj = getattr(event, "message_obj", None)
+        for component in getattr(message_obj, "message", []) or []:
+            if isinstance(component, Reply) and component.id is not None:
+                return str(component.id)
+
+        raw_segments = (raw_message or {}).get("message", [])
+        if isinstance(raw_segments, list):
+            for segment in raw_segments:
+                if not isinstance(segment, dict) or segment.get("type") != "reply":
+                    continue
+                data = segment.get("data")
+                if isinstance(data, dict) and data.get("id") is not None:
+                    return str(data["id"])
+        return None
+
+    @staticmethod
+    def _match_student_choice(choice: dict[str, Any], text: str) -> int | str | None:
+        normalized = text.strip().casefold()
+        if normalized in {"取消", "取消查询", "cancel"}:
+            return "cancel"
+        candidates = choice["candidates"]
+        if normalized.isdigit():
+            index = int(normalized)
+            if index == len(candidates) + 1:
+                return "cancel"
+            if 1 <= index <= len(candidates):
+                return index - 1
+        for index, label in enumerate(choice["labels"]):
+            if normalized == label.casefold():
+                return index
+        return None
+
+    async def _finish_student_choice(
+        self,
+        event: AstrMessageEvent,
+        choice: dict[str, Any],
+        action: Any,
+    ):
+        token = choice["token"]
+        if self._pending_student_queries.get(token) is not choice:
+            return
+        if action == "cancel":
+            self._close_student_choice(token)
+            yield event.plain_result("已取消学生查询。")
+            return
+        if not isinstance(action, int) or not 0 <= action < len(choice["candidates"]):
+            return
+        student = choice["candidates"][action]
+        if choice.get("query_mode") == "guide":
+            results = self._fetch_guide_image(
+                event, str(student.get("Name") or student.get("PathName") or "")
+            )
+        else:
+            results = self._render_student_detail(event, student, choice["language"])
+        async for result in results:
+            yield result
+
+    @staticmethod
+    def _student_candidate_labels(
+        candidates: list[dict[str, Any]],
+    ) -> list[str]:
+        labels = [
+            str(student.get("Name") or student.get("PathName") or student.get("Id"))
+            for student in candidates
+        ]
+        counts = {label: labels.count(label) for label in set(labels)}
+        for index, label in enumerate(labels):
+            if counts[label] > 1:
+                student = candidates[index]
+                detail = student.get("PathName") or student.get("Id")
+                labels[index] = f"{label}（{detail}）"
+        return labels
+
+    async def _start_student_choice(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        candidates: list[dict[str, Any]],
+        language: str,
+        query_mode: str = "detail",
+    ) -> tuple[bool, str]:
+        user_id = str(event.get_sender_id() or "")
+        if not user_id:
+            return False, "无法识别查询者，暂时无法创建学生候选菜单。"
+
+        group_id = str(event.get_group_id() or "")
+        bot = getattr(event, "bot", None)
+        if (
+            not group_id
+            or bot is None
+            or not hasattr(bot, "send_group_msg")
+            or not hasattr(bot, "set_msg_emoji_like")
+        ):
+            return False, "当前平台不支持发送学生候选互动菜单。"
+
+        self._cleanup_student_choices()
+        max_active_menus = self._student_choice_max_active_menus()
+        active_in_group = sum(
+            choice["group_id"] == group_id
+            for choice in self._pending_student_queries.values()
+        )
+        if active_in_group >= max_active_menus:
+            return (
+                False,
+                f"本群已有 {max_active_menus} 个学生候选菜单正在等待选择；"
+                "请使用已有菜单或等待菜单过期后再查询。",
+            )
+
+        shown_candidates = candidates[:MAX_STUDENT_CHOICES]
+        labels = self._student_candidate_labels(shown_candidates)
+        token = uuid4().hex
+        choice = {
+            "token": token,
+            "group_id": group_id,
+            "user_id": user_id,
+            "created_at": time.time(),
+            "timeout_seconds": self._student_choice_timeout(),
+            "query": query,
+            "query_mode": query_mode,
+            "candidates": shown_candidates,
+            "labels": labels,
+            "language": language,
+            "message_id": "",
+            "emoji_map": {},
+        }
+        self._pending_student_queries[token] = choice
+        self._student_choices_by_token[choice["token"]] = choice
+
+        lines = [f"「{query}」匹配到多个学生，请选择："]
+        source_names = {"cn": "国服", "en": "国际服", "jp": "日服"}
+        for index, (student, label) in enumerate(
+            zip(shown_candidates, labels), start=1
+        ):
+            source = source_names.get(student.get("_data_source_language"), "其他")
+            lines.append(f"{index}. {label}（{source}数据）")
+        cancel_index = len(shown_candidates) + 1
+        lines.append(f"{cancel_index}. 取消查询")
+        if len(candidates) > len(shown_candidates):
+            lines.append(
+                f"仅显示优先级最高的 {len(shown_candidates)} 项，共有 {len(candidates)} 项；"
+                "可输入更具体的学生名称缩小范围。"
+            )
+        lines.append(
+            "群内任何人都可点击表情查询；发起者可回复此消息选择序号/名称。"
+            "选择后菜单继续有效，点击取消查询关闭菜单。"
+        )
+        prompt = "\n".join(lines)
+
+        try:
+            response = await bot.send_group_msg(
+                group_id=int(group_id),
+                message=prompt,
+            )
+        except Exception as exc:
+            self._close_student_choice(token)
+            self._log_error("student", "failed to send candidate menu", error=exc)
+            return False, prompt
+        message_id = (
+            str(response.get("message_id", "")) if isinstance(response, dict) else ""
+        )
+        if not message_id:
+            self._close_student_choice(token)
+            self._log_error("student", "candidate menu response has no message ID")
+            return False, prompt
+
+        choice["message_id"] = message_id
+        self._student_candidate_menus[message_id] = choice
+        face_pool = self._student_choice_settings().get("face_pool", [])
+        if not face_pool:
+            face_pool = self._menu_settings().get("face_pool", [])
+        if isinstance(face_pool, str):
+            face_pool = re.split(r"[\s,]+", face_pool.strip())
+        if not isinstance(face_pool, (list, tuple)):
+            face_pool = []
+        unique_faces: list[str] = []
+        for face in (*face_pool, *STUDENT_CHOICE_FALLBACK_FACE_POOL):
+            face_id = str(face).strip()
+            if face_id.isdigit() and face_id not in unique_faces:
+                unique_faces.append(face_id)
+        actions: list[int | str] = list(range(len(shown_candidates))) + ["cancel"]
+        action_index = 0
+        for face_id in unique_faces:
+            if action_index >= len(actions):
+                break
+            try:
+                await bot.set_msg_emoji_like(
+                    message_id=message_id,
+                    emoji_id=int(face_id),
+                    set=True,
+                )
+            except Exception as exc:
+                self._log_warn(
+                    "student",
+                    "failed to attach candidate reaction",
+                    face_id=face_id,
+                    error=exc,
+                )
+                continue
+            choice["emoji_map"][face_id] = actions[action_index]
+            action_index += 1
+            await asyncio.sleep(0.25)
+        if action_index < len(actions):
+            self._log_warn(
+                "student",
+                "not enough reactions attached to candidate menu",
+                attached=action_index,
+                required=len(actions),
+            )
+        return True, prompt
+
     def _menu_items(self) -> list[dict[str, str]]:
         settings = self._menu_settings()
         raw_items = settings.get("menu_items", [])
@@ -483,9 +942,7 @@ class BAToolbox(Star):
                 continue
             if not face_id and len(items) < len(available_faces):
                 face_id = available_faces[len(items)]
-            items.append(
-                {"label": label, "command": command, "face_id": face_id}
-            )
+            items.append({"label": label, "command": command, "face_id": face_id})
         return items
 
     def _build_reaction_menu_text(self) -> str:
@@ -530,25 +987,23 @@ class BAToolbox(Star):
         except Exception as exc:
             self._log_error("menu", "failed to send menu", error=exc)
             return False
-        message_id = str(response.get("message_id", "")) if isinstance(response, dict) else ""
+        message_id = (
+            str(response.get("message_id", "")) if isinstance(response, dict) else ""
+        )
         if not message_id:
             self._log_error("menu", "platform did not return menu message ID")
             return False
 
-        max_reactions = max(
-            0, int(self._menu_settings().get("menu_max_reactions", 20))
-        )
-        reaction_items = [
-            item for item in items if item["face_id"]
-        ][:max_reactions or None]
+        max_reactions = max(0, int(self._menu_settings().get("menu_max_reactions", 20)))
+        reaction_items = [item for item in items if item["face_id"]][
+            : max_reactions or None
+        ]
         now = time.time()
         self._active_menus[message_id] = {
             "group_id": group_id,
             "created_at": now,
             "items": items,
-            "emoji_map": {
-                item["face_id"]: item for item in reaction_items
-            },
+            "emoji_map": {item["face_id"]: item for item in reaction_items},
         }
         for item in reaction_items:
             try:
@@ -578,9 +1033,7 @@ class BAToolbox(Star):
         for message_id in expired:
             self._active_menus.pop(message_id, None)
         menus = [
-            data
-            for data in self._active_menus.values()
-            if data["group_id"] == group_id
+            data for data in self._active_menus.values() if data["group_id"] == group_id
         ]
         return max(menus, key=lambda data: data["created_at"], default=None)
 
@@ -625,7 +1078,9 @@ class BAToolbox(Star):
             return False
         nested = raw.get("message")
         nested = nested if isinstance(nested, dict) else {}
-        message_id = str(raw.get("message_id") or raw.get("msg_id") or nested.get("message_id") or "")
+        message_id = str(
+            raw.get("message_id") or raw.get("msg_id") or nested.get("message_id") or ""
+        )
         clicker_id = str(
             raw.get("user_id")
             or raw.get("operator_id")
@@ -642,6 +1097,40 @@ class BAToolbox(Star):
             face = nested.get("face") or nested.get("emoji")
             if isinstance(face, dict):
                 face_id = str(face.get("id") or face.get("emoji_id") or "")
+
+        choice = self._student_candidate_menus.get(message_id)
+        if choice and clicker_id and face_id:
+            if time.time() - choice["created_at"] > choice["timeout_seconds"]:
+                self._close_student_choice(choice["token"])
+                return True
+            if time.time() - choice["created_at"] < 1.5:
+                return True
+            action = choice["emoji_map"].get(face_id)
+            if action is None:
+                return False
+            debounce_key = (message_id, clicker_id, face_id)
+            now = time.time()
+            debounce_seconds = max(
+                0, int(self._menu_settings().get("debounce_seconds", 3))
+            )
+            if now - self._menu_debounce.get(debounce_key, 0) < debounce_seconds:
+                return True
+            self._menu_debounce[debounce_key] = now
+            if not await self._execute_menu_command(
+                event,
+                clicker_id,
+                choice["group_id"],
+                "__ba_student_choice__",
+                internal_payload={
+                    "_ba_student_choice_token": choice["token"],
+                    "_ba_student_choice_action": action,
+                    "_ba_student_choice_actor_id": clicker_id,
+                },
+            ):
+                self._log_error("student", "failed to dispatch candidate selection")
+            self._stop_menu_event(event)
+            return True
+
         menu = self._active_menus.get(message_id)
         if not menu or not clicker_id or not face_id:
             return False
@@ -669,28 +1158,32 @@ class BAToolbox(Star):
         return True
 
     async def _execute_menu_command(
-        self, event: AstrMessageEvent, user_id: str, group_id: str, command: str
+        self,
+        event: AstrMessageEvent,
+        user_id: str,
+        group_id: str,
+        command: str,
+        internal_payload: dict[str, Any] | None = None,
     ) -> bool:
         if AstrBotMessage is not None and MessageMember is not None:
             try:
                 fake_message = AstrBotMessage()
-                fake_message.self_id = (
-                    getattr(getattr(event, "message_obj", None), "self_id", None)
-                    or getattr(event, "self_id", "")
-                )
-                fake_message.sender = MessageMember(
-                    user_id=user_id, nickname=user_id
-                )
-                fake_message.type = (
-                    getattr(getattr(event, "message_obj", None), "type", None)
-                    or getattr(event, "message_type", "")
-                )
+                fake_message.self_id = getattr(
+                    getattr(event, "message_obj", None), "self_id", None
+                ) or getattr(event, "self_id", "")
+                fake_message.sender = MessageMember(user_id=user_id, nickname=user_id)
+                fake_message.type = getattr(
+                    getattr(event, "message_obj", None), "type", None
+                ) or getattr(event, "message_type", "")
                 fake_message.group_id = group_id
                 fake_message.session_id = group_id
                 fake_message.message_id = f"ba_menu_{int(time.time() * 1000)}_{user_id}"
                 fake_message.message_str = command
                 fake_message.message = [Plain(text=command)]
-                fake_message.raw_message = {"_ba_menu_internal": True}
+                fake_message.raw_message = {
+                    "_ba_menu_internal": True,
+                    **(internal_payload or {}),
+                }
                 platform_id = (
                     event.get_platform_id()
                     if callable(getattr(event, "get_platform_id", None))
@@ -701,18 +1194,21 @@ class BAToolbox(Star):
                     if platform_id is not None
                     else None
                 )
-                if platform and hasattr(platform, "create_event") and hasattr(
-                    platform, "commit_event"
+                if (
+                    platform
+                    and hasattr(platform, "create_event")
+                    and hasattr(platform, "commit_event")
                 ):
                     virtual_event = platform.create_event(fake_message)
                     platform.commit_event(virtual_event)
                     return True
             except Exception as exc:
                 self._log_warn("menu", "virtual command dispatch failed", error=exc)
+        if internal_payload:
+            return False
         try:
-            session = (
-                getattr(event, "unified_msg_origin", None)
-                or getattr(event, "session_id", None)
+            session = getattr(event, "unified_msg_origin", None) or getattr(
+                event, "session_id", None
             )
             if not session:
                 session = f"{getattr(event, 'platform_id', 'aiocqhttp')}:group_message:{group_id}"
@@ -731,7 +1227,9 @@ class BAToolbox(Star):
             try:
                 stop_event()
             except Exception as exc:
-                self._log_warn("menu", "failed to stop menu event propagation", error=exc)
+                self._log_warn(
+                    "menu", "failed to stop menu event propagation", error=exc
+                )
 
     # ------------------------------------------------------------------
     # 命令解析
@@ -758,7 +1256,11 @@ class BAToolbox(Star):
         if text.startswith("/"):
             text = text[1:].lstrip()
         normalized_commands = sorted(
-            (str(command).strip().lstrip("/") for command in commands if str(command).strip()),
+            (
+                str(command).strip().lstrip("/")
+                for command in commands
+                if str(command).strip()
+            ),
             key=len,
             reverse=True,
         )
@@ -778,8 +1280,12 @@ class BAToolbox(Star):
     async def _handle_student_detail(self, event: AstrMessageEvent, name: str):
         """查询完整 SchaleDB 学生数据并渲染详情卡片。"""
         if not name:
+            commands = self._get_command("detail_query", ["学生", "ba_student"])
+            command = commands[0] if commands else "学生"
             yield event.plain_result(
-                "BA 学生详情查询\n用法：学生 <学生名>\n例如：学生 日富美（赛车）"
+                "BA 学生详情查询\n"
+                "请输入至少一部分学生名称进行模糊搜索并选择。\n"
+                f"用法：/{command} <学生名>\n例如：/{command} 爱丽丝"
             )
             return
 
@@ -795,15 +1301,39 @@ class BAToolbox(Star):
             language = "cn"
         try:
             student = await self.schaledb.search_student(name, language)
-            student = await self.schaledb.prepare_student(student, language)
+        except StudentAmbiguousError as exc:
+            sent, prompt = await self._start_student_choice(
+                event, name, exc.candidates, language
+            )
+            if not sent:
+                yield event.plain_result(prompt)
+            return
         except SchaleDBError as exc:
             self._log_error("student", "SchaleDB lookup failed", error=exc)
             yield event.plain_result(f"学生数据查询失败：{exc}")
             return
 
+        async for result in self._render_student_detail(event, student, language):
+            yield result
+
+    async def _render_student_detail(
+        self,
+        event: AstrMessageEvent,
+        student: dict[str, Any],
+        language: str,
+    ):
+        try:
+            student = await self.schaledb.prepare_student(student, language)
+        except SchaleDBError as exc:
+            self._log_error("student", "SchaleDB student preparation failed", error=exc)
+            yield event.plain_result(f"学生数据准备失败：{exc}")
+            return
+
         if self.schaledb.last_error:
             self._log_warn(
-                "student", "SchaleDB used fallback data", detail=self.schaledb.last_error
+                "student",
+                "SchaleDB used fallback data",
+                detail=self.schaledb.last_error,
             )
         if self.schaledb.asset_errors:
             self._log_warn(
@@ -815,7 +1345,7 @@ class BAToolbox(Star):
 
         # Render the original SchaleDB record; do not flatten or re-enrich its fields.
         try:
-            card_bytes = render_student_detail(student)
+            card_bytes = await self._render_in_thread(render_student_detail, student)
         except Exception as e:
             self._log_error("student", "render failed", error=e)
             yield event.plain_result("渲染失败，请稍后重试。")
@@ -884,7 +1414,8 @@ class BAToolbox(Star):
                 events=events,
                 region=server_region,
             )
-            yield event.image_result(str(self._store_card(card.render())))
+            card_bytes = await self._render_in_thread(card.render)
+            yield event.image_result(str(self._store_card(card_bytes)))
             if mode == "mixed":
                 yield event.plain_result("\n".join(lines))
         except Exception as exc:
@@ -959,14 +1490,17 @@ class BAToolbox(Star):
             missing_portraits = len(set(pool_student_names)) - len(student_icons)
             if missing_portraits:
                 self._log_warn(
-                    "pool", "student portraits could not be matched", count=missing_portraits
+                    "pool",
+                    "student portraits could not be matched",
+                    count=missing_portraits,
                 )
             card = CardPoolCard(
                 pools=pools,
                 region=server_region,
                 student_icons=student_icons,
             )
-            yield event.image_result(str(self._store_card(card.render())))
+            card_bytes = await self._render_in_thread(card.render)
+            yield event.image_result(str(self._store_card(card_bytes)))
             if mode == "mixed":
                 yield event.plain_result("\n".join(lines))
         except Exception as exc:
@@ -980,7 +1514,9 @@ class BAToolbox(Star):
     async def _handle_birthday(self, event: AstrMessageEvent, args: str):
         """查询学生生日。"""
         if args.strip():
-            yield event.plain_result("学生生日数据为全服通用，无需指定服务器区域。用法：生日")
+            yield event.plain_result(
+                "学生生日数据为全服通用，无需指定服务器区域。用法：生日"
+            )
             return
 
         language = str(self._get_setting("student_data_language") or "cn")
@@ -993,15 +1529,15 @@ class BAToolbox(Star):
 
         if self.schaledb.last_error:
             self._log_warn(
-                "birthday", "SchaleDB used fallback data", detail=self.schaledb.last_error
+                "birthday",
+                "SchaleDB used fallback data",
+                detail=self.schaledb.last_error,
             )
         if not birthday_records:
             yield event.plain_result("暂无生日数据。")
             return
 
-        birthday_students = [
-            (name, birthday) for name, birthday, _ in birthday_records
-        ]
+        birthday_students = [(name, birthday) for name, birthday, _ in birthday_records]
         today = (datetime.now().month, datetime.now().day)
 
         def upcoming_key(record: tuple[str, str]) -> tuple[int, int, int, str]:
@@ -1012,9 +1548,7 @@ class BAToolbox(Star):
             return (0 if (month, day) >= today else 1, month, day, record[0])
 
         students = sorted(birthday_students, key=upcoming_key)[:24]
-        records_by_name = {
-            name: student_id for name, _, student_id in birthday_records
-        }
+        records_by_name = {name: student_id for name, _, student_id in birthday_records}
         mode = str(self._get_setting("message_mode", "card"))
         if mode == "text":
             lines = [f"学生生日列表（共 {len(birthday_students)} 位）："]
@@ -1047,11 +1581,7 @@ class BAToolbox(Star):
                     count=len(self.schaledb.asset_errors),
                 )
             missing_portraits = len(
-                {
-                    name
-                    for name, _ in students
-                    if records_by_name.get(name) is not None
-                }
+                {name for name, _ in students if records_by_name.get(name) is not None}
             ) - len(student_icons)
             if missing_portraits:
                 self._log_warn(
@@ -1063,7 +1593,8 @@ class BAToolbox(Star):
                 students=students,
                 student_icons=student_icons,
             )
-            yield event.image_result(str(self._store_card(card.render())))
+            card_bytes = await self._render_in_thread(card.render)
+            yield event.image_result(str(self._store_card(card_bytes)))
             if mode == "mixed":
                 lines = [f"学生生日列表（共 {len(birthday_students)} 位）："]
                 lines.extend(f"• {name}：{birthday}" for name, birthday in students)
@@ -1077,20 +1608,58 @@ class BAToolbox(Star):
     # ------------------------------------------------------------------
 
     async def _handle_guide(self, event: AstrMessageEvent, name: str):
-        """查询学生攻略图。"""
+        """通过模糊匹配的学生名称查询攻略图片。"""
         if not name:
+            commands = self._get_command("guide_query", ["攻略", "ba_guide"])
+            command = commands[0] if commands else "攻略"
             yield event.plain_result(
-                "BA 攻略查询\n用法：攻略 <学生名>\n例如：攻略 日富美（赛车）"
+                "BA 攻略查询\n"
+                "请输入至少一部分学生名称进行模糊搜索并选择。\n"
+                f"用法：/{command} <学生名>\n例如：/{command} 爱丽丝"
             )
             return
 
+        language = str(
+            self._get_setting("student_data_language")
+            or self._get_server_region(
+                str(getattr(event, "unified_msg_origin", "") or "")
+            )
+        )
+        if language == "all":
+            language = "cn"
+        try:
+            candidates = await self.schaledb.search_student_candidates(name, language)
+        except SchaleDBError as exc:
+            self._log_error("guide", "student name lookup failed", error=exc)
+            yield event.plain_result(f"攻略学生名称匹配失败：{exc}")
+            return
+
+        if len(candidates) > 1:
+            sent, prompt = await self._start_student_choice(
+                event,
+                name,
+                candidates,
+                language,
+                query_mode="guide",
+            )
+            if not sent:
+                yield event.plain_result(prompt)
+            return
+
+        student_name = str(
+            candidates[0].get("Name") or candidates[0].get("PathName") or name
+        )
+        async for result in self._fetch_guide_image(event, student_name):
+            yield result
+
+    async def _fetch_guide_image(self, event: AstrMessageEvent, name: str):
         try:
             guide_url = await self.arona.get_guide_image(name)
-        except AronaAmbiguousError as e:
-            yield event.plain_result(str(e))
+        except AronaAmbiguousError as exc:
+            yield event.plain_result(str(exc))
             return
-        except Exception as e:
-            self._log_error("guide", "fetch failed", error=e)
+        except Exception as exc:
+            self._log_error("guide", "fetch failed", error=exc)
             yield event.plain_result("获取攻略失败，请稍后重试。")
             return
 
@@ -1120,11 +1689,16 @@ class BAToolbox(Star):
                 continue
             umo, separator, region = entry.rpartition(":")
             region = region.strip().lower()
-            if separator and umo.strip() == event_umo and region in (
-                "cn",
-                "global",
-                "jp",
-                "all",
+            if (
+                separator
+                and umo.strip() == event_umo
+                and region
+                in (
+                    "cn",
+                    "global",
+                    "jp",
+                    "all",
+                )
             ):
                 return region
         return default_region

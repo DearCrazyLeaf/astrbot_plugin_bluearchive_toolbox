@@ -408,13 +408,37 @@
       title.textContent = entry.label || entry.category || "轮询结果";
       const badge = document.createElement("span");
       badge.className = `poll-card-state ${entry.status === "failed" ? "failed" : "success"}`;
-      badge.textContent = entry.status === "failed" ? "失败" : "已归档";
+      badge.textContent = entry.status === "failed" ? "生成失败" : "已生成并归档";
       heading.append(title, badge);
       const meta = document.createElement("p");
       const timestamp = entry.created_at ? new Date(entry.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
       const regionNames = { cn: "国服", global: "国际服", jp: "日服", all: "全服" };
       const details = [regionNames[entry.region] || entry.region, timestamp].filter(Boolean);
       if (entry.status !== "failed") details.push(`${entry.item_count || 0} 项`);
+      const deliveryLabels = {
+        sent: "推送成功",
+        partial: "部分推送失败",
+        failed: "推送失败",
+        unconfigured: "未配置推送群",
+        pending: "等待推送",
+        skipped: "未推送（卡片生成失败）",
+      };
+      if (entry.delivery_status) {
+        const recipients = Array.isArray(entry.delivery_results)
+          ? entry.delivery_results
+          : [];
+        const targetSummary = recipients
+          .map((result) => {
+            const resultLabel = result.status === "sent"
+              ? "成功"
+              : `失败${result.error ? `：${result.error}` : ""}`;
+            return `${result.target || "未知会话"}：${resultLabel}`;
+          })
+          .join("，");
+        details.push(
+          `推送：${deliveryLabels[entry.delivery_status] || entry.delivery_status}${targetSummary ? `（${targetSummary}）` : ""}`,
+        );
+      }
       meta.textContent = details.join(" · ");
       card.append(heading, meta);
 

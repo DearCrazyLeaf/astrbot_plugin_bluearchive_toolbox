@@ -38,8 +38,10 @@ class PollArchiveTests(unittest.TestCase):
 
             self.assertEqual(success["status"], "success")
             self.assertEqual(success["run_id"], "20250308T080000")
+            self.assertEqual(success["delivery_status"], "unconfigured")
             self.assertEqual(failure["status"], "failed")
             self.assertEqual(failure["error"], "API unavailable")
+            self.assertEqual(failure["delivery_status"], "skipped")
             self.assertEqual(archive.get_day("2025-03-08"), [success, failure])
             self.assertEqual(
                 archive.list_days(),
@@ -58,6 +60,43 @@ class PollArchiveTests(unittest.TestCase):
             )
             with self.assertRaises(FileNotFoundError):
                 archive.image_path("2025-03-08", "birthday", failure["run_id"])
+
+    def test_updates_and_persists_delivery_results(self):
+        with TemporaryDirectory() as temp_dir:
+            archive = PollArchive(temp_dir)
+            archive.save_result(
+                archive_date="2025-03-08",
+                run_id="20250308T080000",
+                category="schedule",
+                region="all",
+                item_count=3,
+                image=b"png-data",
+                has_push_targets=True,
+            )
+
+            updated = archive.update_delivery(
+                archive_date="2025-03-08",
+                category="schedule",
+                run_id="20250308T080000",
+                delivery_results=[
+                    {
+                        "target": "aiocqhttp:GroupMessage:123456",
+                        "status": "sent",
+                        "error": "",
+                    },
+                    {
+                        "target": "aiocqhttp:GroupMessage:654321",
+                        "status": "failed",
+                        "error": "connection failed",
+                    },
+                ],
+            )
+
+            self.assertEqual(updated["delivery_status"], "partial")
+            self.assertEqual(
+                archive.get_day("2025-03-08")[0]["delivery_results"],
+                updated["delivery_results"],
+            )
 
     def test_rejects_invalid_archive_paths(self):
         with TemporaryDirectory() as temp_dir:

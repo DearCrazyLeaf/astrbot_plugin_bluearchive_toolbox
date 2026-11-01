@@ -1,7 +1,7 @@
 name: astrbot_plugin_bluearchive_toolbox
 display_name: BA 工具箱
 desc: 为 《碧蓝档案》 开发的工具箱，自带WEBUI，支持查询 国服/国际服/日服 的学生信息，活动信息，千里眼等；还支持分UMO会话订阅推送更新，内置互动菜单功能，模仿QQ官方机器人的按钮交互功能
-version: v1.0.0
+version: v1.0.1
 author: DearCrazyLeaf
 support_platforms:
   - aiocqhttp

@@ -6,7 +6,10 @@ import unittest
 from unittest.mock import AsyncMock
 
 from api_clients.arona_client import AronaAmbiguousError, AronaClient
-from api_clients.schaledb_client import SchaleDBClient, SchaleDBError
+from api_clients.schaledb_client import (
+    SchaleDBClient,
+    StudentAmbiguousError,
+)
 from api_clients.cache_manager import ImageCacheManager
 from api_clients.gamekee import GameKeeClient
 from renderers.card import BirthdayCard, CardPoolCard, ScheduleCard
@@ -259,9 +262,7 @@ class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
 
         specs = client._download_assets.await_args.args[0]
         self.assertNotIn("school", specs)
-        card = StudentDetailCard(
-            {**prepared, "_render_assets": {}}
-        )
+        card = StudentDetailCard({**prepared, "_render_assets": {}})
         school_markup = card._build_html()
         self.assertIn("栅川中学", school_markup)
         self.assertIn("img/schaledb/Terrain_Street.png", school_markup)
@@ -280,15 +281,6 @@ class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["Id"], 10000)
 
     async def test_search_uses_japanese_record_and_localized_display_name(self):
-        japanese = [
-            {
-                "Id": 20005,
-                "Name": "Hifumi (Swimsuit)",
-                "BulletType": "Pierce",
-                "AttackPower100": 1234,
-                "Skills": {"Ex": {"Name": "Japanese", "Desc": "Japanese desc"}},
-            }
-        ]
         chinese = [
             {
                 "Id": 20005,
@@ -298,24 +290,44 @@ class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
                 "Skills": {"Ex": {"Name": "泳装攻击", "Desc": "造成伤害"}},
             }
         ]
+        english = [
+            {
+                "Id": 20005,
+                "Name": "Hifumi (Swimsuit)",
+                "BulletType": "Pierce",
+                "AttackPower100": 1234,
+                "Skills": {"Ex": {"Name": "Swimsuit Attack", "Desc": "Deals damage"}},
+            }
+        ]
+        japanese = [
+            {
+                "Id": 20005,
+                "Name": "ヒフミ（水着）",
+                "BulletType": "Pierce",
+                "AttackPower100": 1234,
+                "Skills": {"Ex": {"Name": "Japanese", "Desc": "Japanese desc"}},
+            }
+        ]
         with TemporaryDirectory() as temp_dir:
             client = SchaleDBClient(temp_dir)
-            client.get_students = AsyncMock(side_effect=[japanese, chinese])
+            client.get_students = AsyncMock(side_effect=[chinese, english, japanese])
             result = await client.search_student("日富美（泳装）", "cn")
 
         self.assertEqual(result["Id"], 20005)
         self.assertEqual(result["Name"], "日富美（泳装）")
         self.assertEqual(result["Skills"]["Ex"]["Name"], "泳装攻击")
         self.assertEqual(result["AttackPower100"], 1234)
-        self.assertEqual(result["_data_source_language"], "jp")
+        self.assertEqual(result["_data_source_language"], "cn")
+        self.assertEqual(result["_display_language"], "cn")
 
     async def test_search_falls_back_to_localized_only_student(self):
         with TemporaryDirectory() as temp_dir:
             client = SchaleDBClient(temp_dir)
             client.get_students = AsyncMock(
                 side_effect=[
-                    [{"Id": 1, "Name": "JP student", "PathName": "jp_student"}],
                     [{"Id": 2, "Name": "CN only student", "PathName": "cn_only"}],
+                    [],
+                    [{"Id": 1, "Name": "JP student", "PathName": "jp_student"}],
                 ]
             )
             result = await client.search_student("CN only student", "cn")
@@ -334,7 +346,6 @@ class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
             client = SchaleDBClient(temp_dir)
             client.get_students = AsyncMock(
                 side_effect=[
-                    [racing_jp],
                     [
                         {
                             "Id": 10003,
@@ -345,8 +356,11 @@ class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
                             "Id": 10153,
                             "Name": "Hifumi (Racing)",
                             "PathName": "hifumi_racing",
+                            "BulletType": "Explosion",
                         },
                     ],
+                    [],
+                    [racing_jp],
                 ]
             )
             result = await client.search_student("日富美（赛车）", "cn")
@@ -375,8 +389,74 @@ class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
 
-            with self.assertRaises(SchaleDBError):
+            with self.assertRaises(StudentAmbiguousError) as raised:
                 await client.search_student("Hifumi (Racing)")
+
+        self.assertEqual(
+            {candidate["Id"] for candidate in raised.exception.candidates},
+            {1, 2},
+        )
+
+    async def test_search_collects_candidates_and_prefers_cn_then_en_then_jp(self):
+        cn_students = [
+            {
+                "Id": 1,
+                "Name": "爱丽丝",
+                "PathName": "alice",
+                "SearchTags": ["爱丽丝"],
+            },
+            {
+                "Id": 2,
+                "Name": "爱丽丝（女仆）",
+                "PathName": "alice_maid",
+                "SearchTags": ["爱丽丝"],
+            },
+        ]
+        en_students = [
+            {"Id": 1, "Name": "Alice", "PathName": "alice"},
+            {"Id": 2, "Name": "Alice (Maid)", "PathName": "alice_maid"},
+            {"Id": 3, "Name": "Alice (Tactical)", "PathName": "alice_tactical"},
+        ]
+        jp_students = [
+            {"Id": 1, "Name": "アリス", "PathName": "alice"},
+            {"Id": 2, "Name": "アリス（メイド）", "PathName": "alice_maid"},
+            {"Id": 3, "Name": "アリス（臨戦）", "PathName": "alice_tactical"},
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(
+                side_effect=[cn_students, en_students, jp_students]
+            )
+
+            candidates = await client.search_student_candidates("爱丽丝", "cn")
+
+        self.assertEqual([item["Id"] for item in candidates], [1, 2])
+        self.assertEqual(
+            [item["Name"] for item in candidates],
+            ["爱丽丝", "爱丽丝（女仆）"],
+        )
+        self.assertEqual(
+            [item["_data_source_language"] for item in candidates],
+            ["cn", "cn"],
+        )
+        self.assertEqual(
+            [call.args[0] for call in client.get_students.await_args_list],
+            ["cn", "en", "jp"],
+        )
+
+    async def test_search_falls_back_from_cn_to_en_before_jp(self):
+        english = [{"Id": 2, "Name": "Alice (Tactical)", "PathName": "alice_tactical"}]
+        japanese = [{"Id": 2, "Name": "アリス（臨戦）", "PathName": "alice_tactical"}]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(side_effect=[[], english, japanese])
+
+            student = await client.search_student("Alice (Tactical)", "cn")
+
+        self.assertEqual(student["Id"], 2)
+        self.assertEqual(student["Name"], "Alice (Tactical)")
+        self.assertEqual(student["_data_source_language"], "en")
+        self.assertEqual(student["_display_language"], "en")
 
     async def test_birthday_records_are_sorted_and_accept_both_api_fields(self):
         with TemporaryDirectory() as temp_dir:
@@ -554,7 +634,10 @@ class StudentDetailCardTests(unittest.TestCase):
         self.assertIn("Theme 265", memory_lobby)
         self.assertIn('class="hero-section"', rendered_html)
         self.assertIn('class="hero-bottom"', rendered_html)
-        self.assertIn("clip-path: polygon(7px 0, 100% 0, calc(100% - 7px) 100%, 0 100%)", rendered_html)
+        self.assertIn(
+            "clip-path: polygon(7px 0, 100% 0, calc(100% - 7px) 100%, 0 100%)",
+            rendered_html,
+        )
         self.assertNotIn("--tag-button", rendered_html)
         self.assertLess(
             rendered_html.index('class="adapt-panel"'),

@@ -43,6 +43,8 @@ class PollArchive:
         item_count: int,
         image: bytes | None,
         error: str | None = None,
+        delivery_results: list[dict[str, str]] | None = None,
+        has_push_targets: bool = False,
     ) -> dict[str, Any]:
         self._date_path(archive_date)
         if not _RUN_ID_PATTERN.fullmatch(run_id):
@@ -75,10 +77,76 @@ class PollArchive:
             "item_count": item_count,
             "error": error[:500] if error else "",
             "image": filename,
+            "delivery_status": self._delivery_status(
+                delivery_results or [],
+                has_push_targets,
+                image is not None,
+                pending=has_push_targets and image is not None and not delivery_results,
+            ),
+            "delivery_results": delivery_results or [],
         }
         manifest_path = day_dir / "index.json"
         entries = self._read_manifest(manifest_path)
         entries.append(entry)
+        temp_manifest = manifest_path.with_suffix(".json.tmp")
+        try:
+            temp_manifest.write_text(
+                json.dumps(
+                    {"date": archive_date, "entries": entries},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            temp_manifest.replace(manifest_path)
+        finally:
+            temp_manifest.unlink(missing_ok=True)
+        return entry
+
+    @staticmethod
+    def _delivery_status(
+        results: list[dict[str, str]],
+        has_push_targets: bool,
+        has_image: bool,
+        pending: bool = False,
+    ) -> str:
+        if not has_image:
+            return "skipped"
+        if not has_push_targets:
+            return "unconfigured"
+        if pending:
+            return "pending"
+        if not results:
+            return "failed"
+        sent_count = sum(result.get("status") == "sent" for result in results)
+        if sent_count == len(results):
+            return "sent"
+        if sent_count:
+            return "partial"
+        return "failed"
+
+    def update_delivery(
+        self,
+        *,
+        archive_date: str,
+        category: str,
+        run_id: str,
+        delivery_results: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        self._date_path(archive_date)
+        if not _RUN_ID_PATTERN.fullmatch(run_id) or category not in _CATEGORIES:
+            raise ValueError("Invalid archive entry identifier")
+
+        manifest_path = self.directory / archive_date / "index.json"
+        entries = self._read_manifest(manifest_path)
+        entry_id = f"{category}-{run_id}"
+        entry = next((item for item in entries if item.get("id") == entry_id), None)
+        if entry is None:
+            raise FileNotFoundError("Poll archive entry not found")
+        entry["delivery_results"] = delivery_results
+        entry["delivery_status"] = self._delivery_status(
+            delivery_results, True, entry.get("image") is not None
+        )
         temp_manifest = manifest_path.with_suffix(".json.tmp")
         try:
             temp_manifest.write_text(

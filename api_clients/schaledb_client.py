@@ -19,6 +19,15 @@ class SchaleDBError(RuntimeError):
     """Raised when SchaleDB data cannot be retrieved or matched."""
 
 
+class StudentAmbiguousError(SchaleDBError):
+    """Raised when a student query matches multiple selectable records."""
+
+    def __init__(self, query: str, candidates: list[dict[str, Any]]):
+        self.query = query
+        self.candidates = candidates
+        super().__init__(f"「{query}」匹配到多个学生。")
+
+
 class SchaleDBClient:
     """Fetch and cache SchaleDB student records and their render assets."""
 
@@ -285,11 +294,9 @@ class SchaleDBClient:
         language: str,
     ) -> dict[str, Any]:
         record = cls._merge_localized_student(latest, localized)
-        if (
-            localized
-            and cls._normalize_name(str(localized.get("Name") or ""))
-            == cls._normalize_name(str(latest.get("Name") or ""))
-        ):
+        if localized and cls._normalize_name(
+            str(localized.get("Name") or "")
+        ) == cls._normalize_name(str(latest.get("Name") or "")):
             variant_name = cls._localized_variant_name(
                 latest, localized_students, language
             )
@@ -297,53 +304,69 @@ class SchaleDBClient:
                 record["Name"] = variant_name
         return record
 
-    async def search_student(self, name: str, language: str = "cn") -> dict[str, Any]:
+    async def search_student_candidates(
+        self, name: str, language: str = "cn"
+    ) -> list[dict[str, Any]]:
         query = self._normalize_name(name)
         if not query:
             raise SchaleDBError("请输入学生名称。")
 
         language = self.normalize_language(language)
-        try:
-            latest_students = await self.get_students("jp")
-        except SchaleDBError:
-            latest_students = []
-        localized_students = latest_students
-        if language != "jp":
-            try:
-                localized_students = await self.get_students(language)
-            except SchaleDBError:
-                localized_students = []
-        if not latest_students and not localized_students:
-            raise SchaleDBError("无法获取 SchaleDB 学生数据。")
+        source_languages = ["cn", "en", "jp"]
+        if language not in source_languages:
+            source_languages.append(language)
 
-        latest_by_id = {
-            int(student["Id"]): student
-            for student in latest_students
-            if student.get("Id") is not None
-        }
-        localized_by_id = {
-            int(student["Id"]): student
-            for student in localized_students
-            if student.get("Id") is not None
+        students_by_language: dict[str, list[dict[str, Any]]] = {}
+        errors: list[str] = []
+        fallback_notices: list[str] = []
+        for source_language in source_languages:
+            try:
+                students_by_language[source_language] = await self.get_students(
+                    source_language
+                )
+                if self.last_error:
+                    fallback_notices.append(f"{source_language}: {self.last_error}")
+            except SchaleDBError as exc:
+                errors.append(f"{source_language}: {exc}")
+
+        if not any(students_by_language.values()):
+            detail = "；".join(errors)
+            raise SchaleDBError(
+                f"无法获取 SchaleDB 学生数据。{f' {detail}' if detail else ''}"
+            )
+        self.last_error = "；".join((*fallback_notices, *errors)) or None
+
+        students_by_id: dict[str, dict[int, dict[str, Any]]] = {
+            source_language: {
+                int(student["Id"]): student
+                for student in students
+                if student.get("Id") is not None
+            }
+            for source_language, students in students_by_language.items()
         }
         names_by_id: dict[int, set[str]] = {}
-        for student in (*latest_students, *localized_students):
-            if student.get("Id") is None:
-                continue
-            student_id = int(student["Id"])
-            names_by_id.setdefault(student_id, set()).update(
-                self._normalize_name(candidate)
-                for candidate in self._search_names(student)
-                if candidate
-            )
-        for student_id, student in latest_by_id.items():
-            variant_name = self._localized_variant_name(
-                student, localized_students, language
-            )
-            if variant_name:
-                names_by_id.setdefault(student_id, set()).add(
-                    self._normalize_name(variant_name)
+        for students in students_by_language.values():
+            for student in students:
+                if student.get("Id") is None:
+                    continue
+                student_id = int(student["Id"])
+                names_by_id.setdefault(student_id, set()).update(
+                    self._normalize_name(candidate)
+                    for candidate in self._search_names(student)
+                    if candidate
                 )
+        localized_students = students_by_language.get(language, [])
+        if language == "cn":
+            for student in students_by_language.get("jp", []):
+                if student.get("Id") is None:
+                    continue
+                variant_name = self._localized_variant_name(
+                    student, localized_students, language
+                )
+                if variant_name:
+                    names_by_id.setdefault(int(student["Id"]), set()).add(
+                        self._normalize_name(variant_name)
+                    )
 
         exact: set[int] = set()
         scored: list[tuple[int, int, int]] = []
@@ -382,35 +405,64 @@ class SchaleDBClient:
 
         if not matches:
             raise SchaleDBError(f"SchaleDB 中没有找到学生「{name}」。")
-        if len(matches) > 1:
-            candidates = "、".join(
-                str(
-                    latest_by_id.get(student_id, localized_by_id.get(student_id, {}))
-                    .get("Name")
-                    or latest_by_id.get(
-                        student_id, localized_by_id.get(student_id, {})
-                    ).get("PathName")
-                    or student_id
-                )
-                for student_id in sorted(matches)[:5]
-            )
-            raise SchaleDBError(
-                f"「{name}」匹配到多个学生，请使用更具体的名称：{candidates}"
-            )
 
-        student_id = next(iter(matches))
-        latest = latest_by_id.get(student_id)
-        localized = localized_by_id.get(student_id)
-        record = (
-            self._merge_student_for_display(
-                latest, localized, localized_students, language
+        display_languages = list(dict.fromkeys((language, "cn", "en", "jp")))
+        candidates = []
+        for student_id in matches:
+            source_language = next(
+                (
+                    candidate_language
+                    for candidate_language in ("cn", "en", "jp", *source_languages)
+                    if student_id in students_by_id.get(candidate_language, {})
+                ),
+                None,
             )
-            if latest
-            else dict(localized or {})
+            if source_language is None:
+                continue
+            source = students_by_id[source_language][student_id]
+            display_language = next(
+                (
+                    candidate_language
+                    for candidate_language in display_languages
+                    if student_id in students_by_id.get(candidate_language, {})
+                ),
+                source_language,
+            )
+            localized = students_by_id.get(display_language, {}).get(student_id)
+            display_students = students_by_language.get(display_language, [])
+            record = self._merge_localized_student(source, localized)
+            if (
+                language == "cn"
+                and localized
+                and self._normalize_name(str(localized.get("Name") or ""))
+                == self._normalize_name(str(source.get("Name") or ""))
+            ):
+                variant_name = self._localized_variant_name(
+                    source, display_students, language
+                )
+                if variant_name:
+                    record["Name"] = variant_name
+            record["_data_source_language"] = source_language
+            record["_display_language"] = display_language
+            candidates.append(record)
+
+        source_priority = {value: index for index, value in enumerate(source_languages)}
+        candidates.sort(
+            key=lambda student: (
+                source_priority.get(
+                    student["_data_source_language"], len(source_priority)
+                ),
+                str(student.get("Name") or student.get("PathName") or "").casefold(),
+                int(student.get("Id") or 0),
+            )
         )
-        record["_data_source_language"] = "jp" if latest else language
-        record["_display_language"] = language
-        return record
+        return candidates
+
+    async def search_student(self, name: str, language: str = "cn") -> dict[str, Any]:
+        candidates = await self.search_student_candidates(name, language)
+        if len(candidates) > 1:
+            raise StudentAmbiguousError(name, candidates)
+        return candidates[0]
 
     async def _download_asset(self, key: str, url: str) -> tuple[str, str | None]:
         digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
@@ -484,9 +536,7 @@ class SchaleDBClient:
             specs["student_icon"] = f"{base}/student/icon/{quote(str(student_id))}.webp"
             weapon_image = student.get("WeaponImg")
             if isinstance(weapon_image, str) and weapon_image:
-                specs["weapon"] = (
-                    f"{base}/weapon/{quote(weapon_image)}.webp"
-                )
+                specs["weapon"] = f"{base}/weapon/{quote(weapon_image)}.webp"
             else:
                 weapon_owner_id = student_id
                 family_name = student.get("FamilyName")
@@ -546,9 +596,7 @@ class SchaleDBClient:
             if isinstance(memory_lobby, list) and any(
                 isinstance(level, int) and level > 0 for level in memory_lobby
             ):
-                specs["lobby"] = (
-                    f"{base}/student/lobby/{quote(str(student_id))}.webp"
-                )
+                specs["lobby"] = f"{base}/student/lobby/{quote(str(student_id))}.webp"
             if isinstance(student.get("Gear"), dict) and student["Gear"].get("Name"):
                 specs["gear"] = f"{base}/gear/icon/{quote(str(student_id))}.webp"
 
@@ -728,7 +776,11 @@ class SchaleDBClient:
             student_id = student.get("Id")
             unique_birthdays.setdefault(
                 identity,
-                (name, str(birthday), int(student_id) if student_id is not None else None),
+                (
+                    name,
+                    str(birthday),
+                    int(student_id) if student_id is not None else None,
+                ),
             )
         birthdays = list(unique_birthdays.values())
 
@@ -807,9 +859,9 @@ class SchaleDBClient:
                     student, localized, language
                 )
                 if variant_name:
-                    name_ids.setdefault(
-                        self._normalize_name(variant_name), set()
-                    ).add(int(student["Id"]))
+                    name_ids.setdefault(self._normalize_name(variant_name), set()).add(
+                        int(student["Id"])
+                    )
 
         matches = {
             normalized: next(iter(student_ids))

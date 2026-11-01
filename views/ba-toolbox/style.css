@@ -252,7 +252,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .poll-card-heading strong { overflow: hidden; color: #3e5b73; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .poll-card-state { flex: 0 0 auto; padding: 3px 7px; border-radius: 10px; color: #338d70; background: #e8f7f0; font-size: 8px; font-weight: 800; }
 .poll-card-state.failed { color: #b75f6c; background: #fff0f2; }
-.poll-card > p { margin: 6px 0 10px; color: #91a4b2; font-size: 9px; }
+.poll-card > p { margin: 6px 0 10px; color: #91a4b2; font-size: 9px; line-height: 1.6; overflow-wrap: anywhere; }
 .poll-card-image-link { display: block; overflow: hidden; border: 1px solid #e6eef2; border-radius: 5px; background: #f5f9fb; line-height: 0; }
 .poll-card-image-link img { display: block; width: 100%; max-height: 500px; object-fit: contain; }
 .poll-card-error { margin: 10px 0 2px !important; color: #b75f6c !important; line-height: 1.6; overflow-wrap: anywhere; }

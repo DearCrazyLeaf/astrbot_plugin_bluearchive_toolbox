@@ -30,6 +30,12 @@ def configure_font_cache_dir(directory: str | Path | None) -> None:
     global _FONT_CACHE_DIR
     _FONT_CACHE_DIR = Path(directory) if directory is not None else None
 
+
+def is_chromium_installed() -> bool:
+    with sync_playwright() as playwright:
+        return Path(playwright.chromium.executable_path).is_file()
+
+
 # 官方 UI 贴图映射（相对路径，用于 ba-asset:// 引用）
 BTN_ASSET_MAP = {
     "blue": "img/ui/buttons/Common_Btn_Normal_B_C_Pt.png",
@@ -111,9 +117,7 @@ FONT_CSS = _font_face_css()
 class HTMLCardRenderer:
     """基于 Playwright 的 HTML 卡片渲染器。"""
 
-    def _render_html(
-        self, html_content: str, width: int, height: int | None
-    ) -> bytes:
+    def _render_html(self, html_content: str, width: int, height: int | None) -> bytes:
         """使用 Playwright 渲染 HTML 并返回 PNG 字节。"""
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -126,7 +130,11 @@ class HTMLCardRenderer:
                     url = route.request.url
                     prefixes = ("ba-asset://", "https://ba-assets.local/")
                     prefix = next(
-                        (candidate for candidate in prefixes if url.startswith(candidate)),
+                        (
+                            candidate
+                            for candidate in prefixes
+                            if url.startswith(candidate)
+                        ),
                         None,
                     )
                     if prefix:
@@ -215,9 +223,7 @@ class HTMLCardRenderer:
         </html>
         """
 
-    def render(
-        self, inner_html: str, width: int, height: int
-    ) -> bytes:
+    def render(self, inner_html: str, width: int, height: int) -> bytes:
         """渲染完整卡片并返回 PNG 字节。"""
         html = self._wrap_bg(inner_html, width, height)
         return self._render_html(html, width, height)
