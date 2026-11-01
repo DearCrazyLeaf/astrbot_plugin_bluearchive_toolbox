@@ -1,0 +1,8 @@
+{
+  "views": {
+    "ba-toolbox": {
+      "title": "BA Toolbox Dashboard",
+      "description": "Blue Archive queries, plugin configuration, themes and data sources"
+    }
+  }
+}

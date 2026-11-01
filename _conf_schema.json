@@ -1,0 +1,372 @@
+{
+    "basic_settings": {
+        "description": "基础设置",
+        "type": "object",
+        "hint": "消息展示方式、默认服务器区域与数据源",
+        "items": {
+            "message_mode": {
+                "description": "默认消息模式",
+                "type": "string",
+                "default": "card",
+                "options": [
+                    "card",
+                    "text",
+                    "mixed"
+                ],
+                "hint": "card=卡片图片，text=纯文本，mixed=卡片+文本混合"
+            },
+            "server_region": {
+                "description": "默认查询服务器区域（活动日程、卡池）",
+                "type": "string",
+                "default": "cn",
+                "options": [
+                    "cn",
+                    "global",
+                    "jp",
+                    "all"
+                ],
+                "hint": "活动/卡池未指定区域时使用。all 表示合并查询国服、国际服和日服；学生详情数据仍优先取最新日服记录，显示语言按 student_data_language 或当前会话区域选择。cn=国服, global=国际服, jp=日服"
+            },
+            "api_base_url": {
+                "description": "GameKee API 域名（留空使用默认 https://www.gamekee.com）",
+                "type": "string",
+                "default": "",
+                "hint": "如能访问镜像站点，填写 https://wiki.ldmnq.com"
+            },
+            "schaledb_base_url": {
+                "description": "SchaleDB API 域名（留空使用默认 https://schaledb.com）",
+                "type": "string",
+                "default": "",
+                "hint": "学生资料、生日及卡片资源使用该数据源；镜像地址填写域名根路径"
+            },
+            "student_data_language": {
+                "description": "学生名称与技能文本语言",
+                "type": "string",
+                "default": "",
+                "hint": "可填 cn、global 或 jp；留空时学生详情跟随当前会话区域，若会话区域为 all 则使用简体中文；生日列表留空时使用简体中文。生日数据不按服务器区分"
+            },
+            "download_full_font": {
+                "description": "自动下载完整卡片字体",
+                "type": "bool",
+                "default": false,
+                "hint": "开启后插件加载时会联网下载并缓存 Resource Han Rounded CN，中文显示更完整；关闭时使用插件自带的精简字体，不会尝试联网下载。网络不可用时建议关闭"
+            },
+            "umo_groups": {
+                "description": "UMO 会话配置",
+                "type": "list",
+                "default": [],
+                "hint": "按完整会话 UMO 配置活动/卡池默认区域，格式为 {完整UMO}:{区域}；例如 aiocqhttp:GroupMessage:123456:jp。区域支持 cn、global、jp、all",
+                "items": {
+                    "type": "string"
+                }
+            }
+        }
+    },
+    "command_settings": {
+        "description": "命令配置",
+        "type": "object",
+        "hint": "各功能模块的触发关键词。可直接发送不带斜杠的指令；也兼容 React Menu 触发的斜杠命令",
+        "items": {
+            "detail_query": {
+                "description": "学生详情查询触发词",
+                "type": "list",
+                "hint": "用途：查询 SchaleDB 学生属性、技能和立绘。触发词后需空格加学生名称；可直接发送“学生 日富美”，也接受“/学生 日富美”，并可作为 React Menu 菜单命令",
+                "default": [
+                    "学生",
+                    "ba_student"
+                ],
+                "items": {
+                    "type": "string"
+                }
+            },
+            "schedule_query": {
+                "description": "活动日程查询触发词",
+                "type": "list",
+                "hint": "触发词后可选填区域 cn、global、jp 或 all；all 会合并三个服务器的数据。未填写时使用 UMO 区域映射或默认服务器区域。无需斜杠前缀",
+                "default": [
+                    "活动",
+                    "日程",
+                    "ba_schedule"
+                ],
+                "items": {
+                    "type": "string"
+                }
+            },
+            "pool_query": {
+                "description": "卡池千里眼查询触发词",
+                "type": "list",
+                "hint": "触发词后可选填区域 cn、global、jp 或 all；all 会合并三个服务器的数据。未填写时使用 UMO 区域映射或默认服务器区域。无需斜杠前缀",
+                "default": [
+                    "卡池",
+                    "千里眼",
+                    "ba_pool"
+                ],
+                "items": {
+                    "type": "string"
+                }
+            },
+            "birthday_query": {
+                "description": "学生生日查询触发词",
+                "type": "list",
+                "hint": "生日列表为全服通用，不接受服务器区域参数；显示名称使用 student_data_language。无需斜杠前缀",
+                "default": [
+                    "生日",
+                    "ba_birthday"
+                ],
+                "items": {
+                    "type": "string"
+                }
+            },
+            "guide_query": {
+                "description": "学生攻略查询触发词",
+                "type": "list",
+                "hint": "用途：按学生名称查询 Arona 攻略图片；必须在触发词后提供学生名（例如“攻略 日富美（赛车）”）。当前 API 不提供按服务器筛选或查询最新攻略集的接口",
+                "default": [
+                    "攻略",
+                    "ba_guide"
+                ],
+                "items": {
+                    "type": "string"
+                }
+            }
+        }
+    },
+    "menu_settings": {
+        "description": "表情回应菜单",
+        "type": "object",
+        "hint": "在群聊发送菜单关键词生成带表情回应的 BA 功能菜单；点击表情或回复序号/菜单项可触发对应查询指令",
+        "items": {
+            "menu_keywords": {
+                "description": "菜单触发关键词",
+                "type": "list",
+                "default": [
+                    "菜单",
+                    "ba菜单"
+                ],
+                "hint": "群聊中发送完整关键词触发菜单；可设置多个",
+                "items": {
+                    "type": "string"
+                }
+            },
+            "detail_query": {
+                "description": "学生详情触发词兼容项",
+                "type": "list",
+                "default": [
+                    "学生",
+                    "ba_student"
+                ],
+                "hint": "此命令必须附带学生名称；菜单项需要写完整指令（例如“学生 日富美”），不能只写“学生”",
+                "items": {
+                    "type": "string"
+                }
+            },
+            "menu_title": {
+                "description": "菜单标题",
+                "type": "string",
+                "default": "📘 BA 工具箱菜单"
+            },
+            "menu_timeout_seconds": {
+                "description": "菜单有效期（秒）",
+                "type": "int",
+                "default": 600,
+                "hint": "过期后点击表情或回复菜单项不再触发指令"
+            },
+            "debounce_seconds": {
+                "description": "表情点击防抖间隔（秒）",
+                "type": "int",
+                "default": 3
+            },
+            "menu_repeat_block": {
+                "description": "是否阻止重复发送菜单",
+                "type": "bool",
+                "default": true
+            },
+            "menu_repeat_reply": {
+                "description": "重复菜单提示",
+                "type": "string",
+                "default": "当前菜单仍然有效，请点击表情或回复菜单项进行查询。"
+            },
+            "menu_divider_char": {
+                "description": "菜单分隔符",
+                "type": "string",
+                "default": "─"
+            },
+            "menu_divider_length": {
+                "description": "分隔符长度",
+                "type": "int",
+                "default": 28
+            },
+            "menu_max_reactions": {
+                "description": "菜单最多贴附表情数",
+                "type": "int",
+                "default": 20
+            },
+            "face_pool": {
+                "description": "自动分配的 QQ 表情 ID",
+                "type": "list",
+                "default": [
+                    "5",
+                    "9",
+                    "10",
+                    "14",
+                    "18",
+                    "21",
+                    "23",
+                    "25",
+                    "27",
+                    "29",
+                    "32",
+                    "49",
+                    "53",
+                    "55",
+                    "59",
+                    "60",
+                    "63",
+                    "66",
+                    "74",
+                    "79",
+                    "89",
+                    "96",
+                    "99",
+                    "100",
+                    "105",
+                    "120",
+                    "123",
+                    "124",
+                    "129",
+                    "144",
+                    "147",
+                    "171",
+                    "175",
+                    "179",
+                    "182",
+                    "183",
+                    "201"
+                ],
+                "hint": "每个菜单项按顺序分配一个表情 ID；菜单项可单独指定 face_id 覆盖",
+                "items": {
+                    "type": "string"
+                }
+            },
+            "menu_items": {
+                "description": "菜单项目列表",
+                "type": "list",
+                "default": [
+                    {
+                        "label": "学生生日",
+                        "command": "生日",
+                        "face_id": "14"
+                    },
+                    {
+                        "label": "卡池千里眼",
+                        "command": "千里眼"
+                    },
+                    {
+                        "label": "活动日程",
+                        "command": "活动"
+                    }
+                ],
+                "hint": "菜单项执行固定指令，不支持点击后再输入参数。学生详情/攻略必须配置完整指令，例如“学生 日富美”或“攻略 日富美（赛车）”；攻略查询按学生名称搜索，不区分服务器。",
+                "items": {
+                    "label": {
+                        "type": "string",
+                        "default": ""
+                    },
+                    "command": {
+                        "type": "string",
+                        "default": ""
+                    },
+                    "face_id": {
+                        "type": "string",
+                        "default": ""
+                    }
+                }
+            }
+        }
+    },
+    "cache_settings": {
+        "description": "生成卡片缓存",
+        "hint": "限制已生成卡片图片的本地缓存；SchaleDB 数据文件和资源图片使用独立缓存策略",
+        "type": "object",
+        "items": {
+            "max_items": {
+                "type": "int",
+                "default": 200,
+                "description": "最大缓存图片数量，超过则按 LRU 清理最旧条目"
+            },
+            "max_size_mb": {
+                "type": "int",
+                "default": 500,
+                "description": "最大缓存总大小 (MB)，超过则清理最旧条目"
+            },
+            "ttl_days": {
+                "type": "int",
+                "default": 7,
+                "description": "缓存过期天数"
+            }
+        }
+    },
+    "polling_settings": {
+        "description": "每日轮询与卡片归档",
+        "hint": "按本地时区每日生成日程、生日和千里眼卡片并保存到轮询记录；此功能只归档，不会向群聊推送",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "type": "bool",
+                "default": true,
+                "description": "启用每日轮询"
+            },
+            "poll_time": {
+                "type": "string",
+                "default": "08:00",
+                "description": "每日轮询时间",
+                "hint": "使用 AstrBot 所在设备的本地时区，24 小时制 HH:MM"
+            },
+            "poll_region": {
+                "type": "string",
+                "default": "all",
+                "options": [
+                    "cn",
+                    "global",
+                    "jp",
+                    "all"
+                ],
+                "description": "日程和千里眼轮询服务器"
+            },
+            "poll_categories": {
+                "type": "list",
+                "default": [
+                    "schedule",
+                    "birthday",
+                    "pool"
+                ],
+                "description": "轮询卡片类别",
+                "hint": "每行填写一个类别：schedule（日程）、birthday（生日）、pool（千里眼）",
+                "items": {
+                    "type": "string",
+                    "options": [
+                        "schedule",
+                        "birthday",
+                        "pool"
+                    ]
+                }
+            },
+            "retention_days": {
+                "type": "int",
+                "default": 30,
+                "description": "轮询记录保留天数"
+            }
+        }
+    },
+    "debug_settings": {
+        "description": "调试设置",
+        "type": "object",
+        "items": {
+            "debug_log": {
+                "type": "bool",
+                "default": false,
+                "description": "输出调试日志到控制台"
+            }
+        }
+    }
+}

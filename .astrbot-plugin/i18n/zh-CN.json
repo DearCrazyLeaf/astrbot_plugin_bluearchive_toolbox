@@ -1,0 +1,8 @@
+{
+  "views": {
+    "ba-toolbox": {
+      "title": "BA 工具箱 Dashboard",
+      "description": "查看碧蓝档案查询功能、编辑插件配置、管理主题和了解数据来源"
+    }
+  }
+}

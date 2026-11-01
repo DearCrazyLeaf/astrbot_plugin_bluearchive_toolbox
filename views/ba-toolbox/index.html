@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>BA 工具箱 · Dashboard</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script defer src="./mascot.js"></script>
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="icon-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10h-6v-6H9v6H3z" /></symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" /><path d="m19.4 15 .1.1 1.4 1.1-1.6 2.8-1.7-.7a8 8 0 0 1-1.4.8l-.3 1.9h-3.2l-.3-1.9a8 8 0 0 1-1.5-.8l-1.6.7-1.6-2.8 1.4-1.1a7 7 0 0 1 0-1.8l-1.4-1.1 1.6-2.8 1.7.7a8 8 0 0 1 1.4-.8l.3-1.9h3.2l.3 1.9a8 8 0 0 1 1.5.8l1.6-.7 1.6 2.8-1.4 1.1a7 7 0 0 1-.1 1.8Z" /></symbol>
+      <symbol id="icon-storage" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" /><path d="M8 9h.01M8 15h.01" /></symbol>
+      <symbol id="icon-network" viewBox="0 0 24 24"><circle cx="6" cy="12" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="m8.3 10.9 7.4-3.8M8.3 13.1l7.4 3.8" /></symbol>
+      <symbol id="icon-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21zM4 5.5v13A2.5 2.5 0 0 1 6.5 16H20" /><path d="M9 7h7M9 10h5" /></symbol>
+      <symbol id="icon-calendar-star" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="16" rx="2" /><path d="M7.5 3v4M16.5 3v4M4 9h16" /><path d="m12 12 .9 1.8 2 .3-1.5 1.4.4 2-1.8-.9-1.8.9.4-2-1.5-1.4 2-.3z" /></symbol>
+      <symbol id="icon-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.64-6.36L3 8" /><path d="M3 3v5h5M12 7v5l3 2" /></symbol>
+      <symbol id="icon-message" viewBox="0 0 24 24"><path d="M20 11.5a7.5 7.5 0 0 1-8 7.5 8.7 8.7 0 0 1-3.6-.8L4 20l1.4-3.5A7.1 7.1 0 0 1 4 12c0-4.1 3.6-7.5 8-7.5s8 3.1 8 7Z" /><path d="M8 11h.01M12 11h.01M16 11h.01" /></symbol>
+      <symbol id="icon-student" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5" /><path d="M4.5 20a7.5 7.5 0 0 1 15 0zM5 5.5l2 1M19 5.5l-2 1" /></symbol>
+      <symbol id="icon-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M3.5 9h17M3.5 15h17M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></symbol>
+      <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></symbol>
+      <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4.5 4.5L19 7" /></symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5" /><path d="M5.5 9a7 7 0 0 1 12-2L20 12M4 12l2.5 5a7 7 0 0 0 12-2" /></symbol>
+      <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M7 17 17 7M8 7h9v9" /></symbol>
+      <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></symbol>
+      <symbol id="icon-sparkle" viewBox="0 0 24 24"><path d="m12 2 2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" /></symbol>
+      <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20.5 15.5A8.5 8.5 0 0 1 8.5 3.5 8.5 8.5 0 1 0 20.5 15.5Z" /></symbol>
+      <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42" /></symbol>
+    </svg>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#" aria-label="BA 工具箱首页">
+          <span class="brand-logo"><img src="./assets/logo.png" alt="" /></span>
+          <span class="brand-copy">
+            <strong>BA 工具箱</strong>
+            <small>BLUE ARCHIVE TOOLBOX</small>
+          </span>
+        </a>
+
+        <div class="sidebar-label">MAIN MENU <i></i></div>
+        <nav class="navigation" aria-label="Dashboard 导航">
+          <button class="nav-item active" data-view="overview">
+            <span class="nav-icon"><svg class="ui-icon"><use href="#icon-home" /></svg></span><span>总览</span><b>01</b>
+          </button>
+          <button class="nav-item" data-view="settings">
+            <span class="nav-icon"><svg class="ui-icon"><use href="#icon-settings" /></svg></span><span>插件设置</span><b>02</b>
+          </button>
+          <button class="nav-item" data-view="resources">
+            <span class="nav-icon"><svg class="ui-icon"><use href="#icon-storage" /></svg></span><span>缓存与资源</span><b>03</b>
+          </button>
+          <button class="nav-item" data-view="polls">
+            <span class="nav-icon"><svg class="ui-icon"><use href="#icon-history" /></svg></span><span>轮询记录</span><b>04</b>
+          </button>
+          <button class="nav-item" data-view="sources">
+            <span class="nav-icon"><svg class="ui-icon"><use href="#icon-network" /></svg></span><span>数据来源</span><b>05</b>
+          </button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="campus-card">
+            <span class="campus-mark"><img src="./assets/icons/Common_Icon_Stamina.png" alt="" /></span>
+            <div><strong>什亭之匣，已上线</strong><small>SHITTIM CHEST · ONLINE</small></div>
+          </div>
+          <div class="version-line"><span class="status-dot"></span> AstrBot 插件视图 <span>v1.0.0</span></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumb"><span>BA TOOLBOX</span><i>/</i><strong id="current-section">总览</strong></div>
+          <div class="topbar-right">
+            <span class="preview-pill" id="plugin-status" role="status" aria-live="polite"><span class="status-dot" aria-hidden="true"></span><span id="plugin-status-text">正在检查插件状态…</span></span>
+            <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切换暗色模式" aria-pressed="false">
+              <span class="theme-toggle-icon" aria-hidden="true"><svg class="ui-icon"><use id="theme-toggle-glyph" href="#icon-moon" /></svg></span><span class="theme-toggle-label">暗色</span>
+            </button>
+          </div>
+        </header>
+
+        <section class="view active" id="view-overview">
+          <div class="welcome-banner">
+            <div class="banner-copy">
+              <span class="section-kicker">SCHALE · ADMIN CONSOLE</span>
+              <h1>欢迎回来，老师<span class="title-spark">✦</span></h1>
+              <p>碧蓝档案活动/千里眼/攻略查询工具箱</p>
+              <button class="official-button primary-button" type="button" data-go="settings">
+              打开插件设置 <svg class="ui-icon button-icon"><use href="#icon-arrow" /></svg>
+              </button>
+            </div>
+            <div class="banner-art" aria-hidden="true">
+              <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+              <div class="halo"></div>
+              <div class="mascot-host" id="mascot-host" data-character="arona" data-model-state="pending" role="img" aria-label="阿洛娜">
+                <img class="mascot-image" id="mascot-image" src="./assets/mascots/arona.webp" alt="" decoding="async" />
+              </div>
+              <img class="credit-icon" src="./assets/icons/Credits.png" alt="" />
+              <img class="banner-diamond" src="./assets/icons/Common_Icon_Diamond.png" alt="" />
+              <span class="banner-star star-one">✦</span><span class="banner-star star-two">✧</span>
+              <div class="banner-caption">SCHALE<br /><small>TACTICAL SUPPORT</small></div>
+            </div>
+            <div class="banner-index">01 <span>/ 05</span></div>
+          </div>
+
+          <div class="section-heading">
+            <div><span class="section-kicker">PLUGIN FUNCTIONS</span><h2>功能一览</h2></div>
+            <span class="section-note">功能与用法</span>
+          </div>
+          <div class="dashboard-columns">
+            <section class="panel feature-panel">
+              <div class="panel-heading">
+                <div><span class="section-kicker">QUERY & CARDS</span><h2>查询功能</h2></div>
+                <span class="heading-mark">01 — 05</span>
+              </div>
+              <table class="feature-table">
+                <thead>
+                  <tr><th colspan="3"><div class="feature-entry feature-entry-heading"><span>功能介绍</span><span>指令示例</span><span>指令类型</span></div></th></tr>
+                </thead>
+                <tbody>
+                  <tr><td colspan="3"><div class="feature-entry"><span class="feature-description"><span class="feature-icon image-icon"><img src="./assets/logo/item_icon_event_object_5_s60.webp" alt="" /></span><span class="feature-copy"><strong>学生详情</strong><small>资料 · 属性 · 技能卡片</small></span></span><code>学生 日富美</code><span class="feature-state">查询</span></div></td></tr>
+                  <tr><td colspan="3"><div class="feature-entry"><span class="feature-description"><span class="feature-icon image-icon"><img src="./assets/icons/item_icon_skillbook_ultimate.webp" alt="" /></span><span class="feature-copy"><strong>学生攻略</strong><small>Arona 攻略图片查询</small></span></span><code>攻略 日富美</code><span class="feature-state">查询</span></div></td></tr>
+                  <tr><td colspan="3"><div class="feature-entry"><span class="feature-description"><span class="feature-icon image-icon"><img src="./assets/icons/collectible_icon_guidemission_s15_1.webp" alt="" /></span><span class="feature-copy"><strong class="feature-title-event">活动日程<img src="./assets/icons/Common_Icon_Event.png" alt="" /></strong><small>按服务器查看近期活动</small></span></span><code>活动 jp</code><span class="feature-state">查询</span></div></td></tr>
+                  <tr><td colspan="3"><div class="feature-entry"><span class="feature-description"><span class="feature-icon image-icon"><img src="./assets/icons/collectible_icon_guidemission01.webp" alt="" /></span><span class="feature-copy"><strong>卡池千里眼</strong><small>查询各服卡池安排</small></span></span><code>卡池 all</code><span class="feature-state">查询</span></div></td></tr>
+                  <tr><td colspan="3"><div class="feature-entry"><span class="feature-description"><span class="feature-icon image-icon"><img src="./assets/icons/item_icon_favor_26.webp" alt="" /></span><span class="feature-copy"><strong>学生生日</strong><small>全服通用生日列表</small></span></span><code>生日</code><span class="feature-state">查询</span></div></td></tr>
+                </tbody>
+              </table>
+            </section>
+
+            <section class="panel source-panel">
+              <div class="panel-heading">
+                <div><span class="section-kicker">HOW TO USE</span><h2>使用提示</h2></div>
+                <span class="network-mark"><svg class="ui-icon"><use href="#icon-network" /></svg></span>
+              </div>
+              <div class="source-list">
+                <div class="source-row"><span class="source-glyph tip-check"><img src="./assets/icons/Common_Icon_Check_B.png" alt="" /></span><div><strong>直接发送指令</strong><small>默认不需要添加 / 前缀</small></div></div>
+                <div class="source-row"><span class="source-glyph tip-check"><img src="./assets/icons/Common_Icon_Check_B.png" alt="" /></span><div><strong>学生查询需带名称</strong><small>例如：学生 日富美（赛车）</small></div></div>
+                <div class="source-row"><span class="source-glyph tip-check"><img src="./assets/icons/Common_Icon_Check_B.png" alt="" /></span><div><strong>按需指定服务器</strong><small>活动与卡池支持 cn / global / jp / all</small></div></div>
+              </div>
+              <div class="tip-strip">
+                <span class="tip-icon"><svg class="ui-icon"><use href="#icon-info" /></svg></span>
+                <p><strong>配置直连</strong><span>可在本页读取并保存 AstrBot 中的插件配置。</span></p>
+                <button type="button" class="text-button" data-go="settings">管理设置 <svg class="ui-icon button-icon"><use href="#icon-chevron" /></svg></button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-settings">
+          <div class="page-title-row">
+            <div><span class="section-kicker">ASTRBOT CONFIGURATION</span><h1>插件设置</h1><p>配置 BA 工具箱的表情回应菜单、每日轮询和其他插件选项。</p></div>
+          </div>
+          <div class="settings-toolbar">
+            <p id="settings-status" class="settings-status" role="status" aria-live="polite">正在连接 AstrBot…</p>
+            <div class="settings-actions">
+              <button class="official-button secondary-button" id="reload-settings" type="button"><svg class="ui-icon button-icon"><use href="#icon-refresh" /></svg>重新载入</button>
+              <button class="official-button primary-button" id="save-settings" type="button" disabled><svg class="ui-icon button-icon"><use href="#icon-check" /></svg>保存设置</button>
+            </div>
+          </div>
+          <div id="settings-groups" class="settings-groups" aria-live="polite"></div>
+          <p class="settings-footnote">更改会直接写入 BA 工具箱配置；菜单配置即时生效，数据源地址、完整字体下载等初始化设置需重载插件后生效。</p>
+        </section>
+
+        <section class="view" id="view-resources">
+          <div class="page-title-row"><div><span class="section-kicker">LOCAL STORAGE</span><h1>缓存与资源</h1><p>插件按自身缓存策略维护卡片和数据资源。</p></div></div>
+          <section class="panel resource-hero">
+            <div class="resource-copy"><span class="section-kicker">CARD IMAGE CACHE</span><h2>本地缓存</h2><p>卡片 PNG、SchaleDB 数据及资源图片使用各自的缓存策略。</p></div>
+            <img src="./assets/icons/Common_Icon_Change.png" alt="" />
+          </section>
+          <section class="panel usage-panel" aria-labelledby="cache-usage-title">
+            <div class="panel-heading">
+              <div><span class="section-kicker">STORAGE USAGE</span><h2 id="cache-usage-title">缓存用量</h2></div>
+              <button class="text-button usage-refresh" id="refresh-cache-usage" type="button"><svg class="ui-icon"><use href="#icon-refresh" /></svg>刷新用量</button>
+            </div>
+            <div class="usage-summary">
+              <div><span>缓存与资源总占用</span><strong id="cache-usage-total">读取中…</strong></div>
+              <div><span>卡片图片</span><strong id="cache-usage-card-limit">—</strong><small id="cache-usage-card-count">—</small></div>
+              <div><span>文件数量</span><strong id="cache-usage-file-count">—</strong></div>
+            </div>
+            <div class="usage-chart" id="cache-usage-chart" role="list" aria-label="各类本地缓存和资源用量"></div>
+            <p class="usage-legend">柱长按当前最大分类归一比较；卡片图片上限为独立配额。</p>
+            <p class="usage-status" id="cache-usage-status" role="status" aria-live="polite">正在读取缓存用量…</p>
+          </section>
+          <section class="panel cache-panel">
+            <div class="panel-heading"><div><span class="section-kicker">STORAGE RULES</span><h2>缓存说明</h2></div><span class="official-button primary-button cache-auto-tag">自动维护</span></div>
+            <div class="rule-row"><span class="rule-icon"><img src="./assets/icons/item_icon_event_token_4_s24.webp" alt="" /></span><span><strong>卡片缓存</strong><small>按插件配置中的有效期、数量和空间上限自动清理。</small></span></div>
+            <div class="rule-row"><span class="rule-icon"><img src="./assets/icons/item_icon_event_token_3_s33.webp" alt="" /></span><span><strong>SchaleDB 缓存</strong><small>数据文件和图片资源保存在 AstrBot 为插件分配的数据目录。</small></span></div>
+            <div class="rule-row"><span class="rule-icon"><img src="./assets/icons/item_icon_event_token_0_60000.webp" alt="" /></span><span><strong>字体资源</strong><small>默认使用插件内置精简字体；完整字体可在原生配置中选择自动下载。</small></span></div>
+          </section>
+          <div class="diagnostic-foot"><span class="status-dot"></span> 用量统计仅汇总文件大小和数量，不展示缓存内容，也不会清理或修改文件。</div>
+        </section>
+
+        <section class="view" id="view-polls">
+          <div class="page-title-row"><div><span class="section-kicker">DAILY POLL ARCHIVE</span><h1>轮询记录</h1><p>按日期查看自动轮询生成的日程、生日和千里眼卡片。</p></div></div>
+          <section class="panel poll-archive-panel">
+            <div class="panel-heading">
+              <div><span class="section-kicker">DAILY RESULTS</span><h2>每日轮询卡片</h2></div>
+              <button class="text-button usage-refresh" id="refresh-poll-archive" type="button"><svg class="ui-icon"><use href="#icon-refresh" /></svg>刷新记录</button>
+            </div>
+            <div class="poll-toolbar">
+              <label for="poll-archive-date">轮询日期</label>
+              <select id="poll-archive-date" disabled aria-label="选择轮询日期"></select>
+              <span id="poll-archive-summary" class="poll-summary" role="status" aria-live="polite">正在读取轮询记录…</span>
+            </div>
+            <div id="poll-archive-status" class="poll-archive-status" role="status" aria-live="polite"></div>
+            <div id="poll-archive-cards" class="poll-archive-grid"></div>
+          </section>
+          <p class="settings-footnote">轮询时间、服务器、类别和保留期限可在“插件设置 → 每日轮询与卡片归档”中调整。归档文件保存在 AstrBot 为插件分配的数据目录，不会自动发送到群聊。</p>
+        </section>
+
+        <section class="view" id="view-sources">
+          <div class="page-title-row"><div><span class="section-kicker">DATA NETWORK</span><h1>数据来源</h1><p>插件按功能使用对应数据源；访问情况取决于运行环境网络。</p></div></div>
+          <section class="panel source-panel">
+            <div class="panel-heading"><div><span class="section-kicker">QUERY SERVICES</span><h2>服务与用途</h2></div><span class="network-mark"><svg class="ui-icon"><use href="#icon-network" /></svg></span></div>
+            <div class="source-list">
+              <a class="source-row" href="https://schaledb.com/" target="_blank" rel="noopener noreferrer"><span class="source-glyph schale"><img class="data-source-icon" src="./assets/icons/item_icon_expitem_3.webp" alt="" /></span><div><strong>SchaleDB</strong><small>学生资料 · 生日 · 立绘资源</small></div><svg class="ui-icon source-arrow"><use href="#icon-arrow" /></svg></a>
+              <a class="source-row" href="https://www.gamekee.com/" target="_blank" rel="noopener noreferrer"><span class="source-glyph gamekee"><img class="data-source-icon" src="./assets/icons/item_icon_event_token_0_s38.webp" alt="" /></span><div><strong>GameKee</strong><small>活动日程 · 卡池信息</small></div><svg class="ui-icon source-arrow"><use href="#icon-arrow" /></svg></a>
+              <a class="source-row" href="https://arona.diyigemt.com/" target="_blank" rel="noopener noreferrer"><span class="source-glyph arona"><img class="data-source-icon" src="./assets/icons/item_icon_event_object_0_s60.webp" alt="" /></span><div><strong>Arona</strong><small>学生攻略图</small></div><svg class="ui-icon source-arrow"><use href="#icon-arrow" /></svg></a>
+            </div>
+          </section>
+          <div class="source-credit-grid">
+            <section class="panel credit-panel">
+              <div class="panel-heading"><div><span class="section-kicker">ASSET SOURCES</span><h2>素材来源</h2></div></div>
+              <div class="repository-badges">
+                <a class="repository-badge" href="https://github.com/ywhdzrb/BlueArchiveUI" target="_blank" rel="noopener noreferrer">
+                  <img src="./assets/logo/BlueArchive-UI_symbolon.png" alt="BlueArchiveUI 仓库徽标" />
+                  <span><strong>BlueArchiveUI · ywhdzrb</strong><small>第三方 Qt6 UI 组件与视觉风格参考</small></span>
+                  <svg class="ui-icon source-arrow"><use href="#icon-arrow" /></svg>
+                </a>
+                <a class="repository-badge" href="https://github.com/RedBeanN/BlueArchive" target="_blank" rel="noopener noreferrer">
+                  <img src="./assets/logo/BlueArchive-main.svg" alt="BlueArchive 仓库徽标" />
+                  <span><strong>奇怪的蔚蓝档案资料库 · RedBeanN</strong><small>学生资料 API、字段结构与卡片合成参考</small></span>
+                  <svg class="ui-icon source-arrow"><use href="#icon-arrow" /></svg>
+                </a>
+              </div>
+              <p class="credit-note">游戏名称及官方游戏素材版权归 NEXON Games；请遵循各来源仓库的素材与许可说明。</p>
+            </section>
+            <section class="panel credit-panel">
+              <div class="panel-heading"><div><span class="section-kicker">SPECIAL THANKS</span><h2>特别鸣谢</h2></div></div>
+              <div class="acknowledgement-list">
+                <a class="acknowledgement-row" href="https://github.com/nicocatxzc/astrbot-plugin-BlueArchive" target="_blank" rel="noopener noreferrer"><span><strong>蔚蓝档案攻略查询 · nicocatxzc</strong><span>指令式攻略、活动与卡池查询组织，以及 GameKee 图文获取和失败回退的处理思路。</span></span><svg class="ui-icon source-arrow"><use href="#icon-arrow" /></svg></a>
+                <a class="acknowledgement-row" href="https://github.com/laopanmemz/astrbot_plugin_babirthday" target="_blank" rel="noopener noreferrer"><span><strong>学生生日提醒 · laopanmemz</strong><span>今日/本周生日列表、学生数据更新和生日提醒交互的设计灵感。</span></span><svg class="ui-icon source-arrow"><use href="#icon-arrow" /></svg></a>
+                <a class="acknowledgement-row" href="https://github.com/anka-afk/astrbot_plugin_blue_archive" target="_blank" rel="noopener noreferrer"><span><strong>攻略查询 · anka</strong><span>Arona 攻略图片查询，以及依据资源哈希复用本地图片缓存的实现思路。</span></span><svg class="ui-icon source-arrow"><use href="#icon-arrow" /></svg></a>
+                <a class="acknowledgement-row" href="https://github.com/AyaseWNA/astrbot_plugin_blue_archive_auto_calendar" target="_blank" rel="noopener noreferrer"><span><strong>活动日历 · AyaseNIA</strong><span>多服务器活动日历展示、按会话选择服务器及定时推送的功能设计思路。</span></span><svg class="ui-icon source-arrow"><use href="#icon-arrow" /></svg></a>
+              </div>
+            </section>
+          </div>
+          <div class="diagnostic-notice"><span><svg class="ui-icon"><use href="#icon-info" /></svg></span><p><strong>网络诊断</strong><br />当前页面不主动检测连通性。实际查询失败时，请检查 AstrBot 所在设备的网络及插件配置中的 API 地址。</p></div>
+        </section>
+
+        <footer class="page-footer"><img class="footer-loader" src="./assets/icons/Common_Deco_Gacha_Icon_Vector.png" alt="" aria-hidden="true" /><span>BA TOOLBOX · SCHALE SYSTEM</span><span>AstrBot 原生插件可视化页面</span></footer>
+      </main>
+    </div>
+  </body>
+</html>

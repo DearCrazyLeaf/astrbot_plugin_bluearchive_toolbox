@@ -1,0 +1,37 @@
+# Python artifacts
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.env
+.env.*
+.venv/
+env/
+venv/
+
+# Tool and test caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime data, generated files, and test output
+/cache/
+test/output/
+test/.font_cache/
+logs/
+*.log
+*.tmp
+*.bak
+*.ttf.download
+
+# Downloaded full font; keep Blueaka.ttf as the bundled compact fallback
+ResourceHanRoundedCN.ttf
+
+# Build and editor artifacts
+/build/
+/dist/
+.DS_Store
+Thumbs.db
