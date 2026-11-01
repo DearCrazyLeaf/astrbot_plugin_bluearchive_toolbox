@@ -53,7 +53,7 @@ jobs:
 
           changed = current_version != previous_version
           version_number = current_version.removeprefix("v")
-          tag_name = f"V{version_number}"
+          tag_name = f"v{version_number}"
 
           output_path = Path(os.environ["GITHUB_OUTPUT"])
           with output_path.open("a", encoding="utf-8") as output:
@@ -99,6 +99,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.metadata.outputs.tag_name }}
-          name: Release V${{ steps.metadata.outputs.version_number }}
+          name: Release ${{ steps.metadata.outputs.tag_name }}
           body_path: release-notes.md
           generate_release_notes: false
