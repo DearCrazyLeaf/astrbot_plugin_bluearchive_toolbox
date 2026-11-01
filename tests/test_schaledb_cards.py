@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from api_clients.arona_client import AronaAmbiguousError, AronaClient
 from api_clients.schaledb_client import (
@@ -184,6 +184,23 @@ class AronaClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dataset_json_is_loaded_once_into_memory_cache(self):
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            path = client._cache_path("cn", "students")
+            path.write_text(
+                '[{"Id":1,"Name":"星野"}]',
+                encoding="utf-8",
+            )
+            with patch.object(
+                client, "_read_dataset_cache", wraps=client._read_dataset_cache
+            ) as read_cache:
+                first = await client._fetch_dataset("students", "cn")
+                second = await client._fetch_dataset("students", "cn")
+
+        self.assertIs(first, second)
+        read_cache.assert_called_once()
+
     async def test_prepare_student_downloads_base_weapon_and_unique_gear_icons(self):
         student = {
             "Id": 10153,
@@ -369,6 +386,315 @@ class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["Name"], "日富美（赛车）")
         self.assertEqual(result["BulletType"], "Explosion")
 
+    async def test_search_matches_variant_name_when_variant_prefix_is_reordered(self):
+        cn_students = [
+            {"Id": 10003, "Name": "星野", "PathName": "hoshino"},
+        ]
+        en_students = [
+            {"Id": 10003, "Name": "Hoshino", "PathName": "hoshino"},
+            {
+                "Id": 10004,
+                "Name": "Hoshino (Swimsuit)",
+                "PathName": "hoshino_swimsuit",
+            },
+        ]
+        jp_students = [
+            {"Id": 10003, "Name": "ホシノ", "PathName": "hoshino"},
+            {
+                "Id": 10004,
+                "Name": "ホシノ（水着）",
+                "PathName": "hoshino_swimsuit",
+            },
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(
+                side_effect=[cn_students, en_students, jp_students]
+            )
+
+            student = await client.search_student("泳装星野", "cn")
+
+        self.assertEqual(student["Id"], 10004)
+        self.assertEqual(student["PathName"], "hoshino_swimsuit")
+
+    async def test_search_supports_partial_name_with_variant_prefix(self):
+        cn_students = [
+            {"Id": 10003, "Name": "星野", "PathName": "hoshino"},
+            {
+                "Id": 10004,
+                "Name": "星野（泳装）",
+                "PathName": "hoshino_swimsuit",
+            },
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(return_value=cn_students)
+
+            student = await client.search_student("泳装星", "cn")
+
+        self.assertEqual(student["Id"], 10004)
+        self.assertEqual(student["Name"], "星野（泳装）")
+
+    async def test_search_expands_student_nicknames_and_variant_aliases(self):
+        students = [
+            {
+                "Id": 10000,
+                "Name": "爱露",
+                "PathName": "aru",
+                "FamilyName": "陆八魔",
+                "PersonalName": "爱露",
+            },
+            {
+                "Id": 10031,
+                "Name": "爱露（新年）",
+                "PathName": "aru_newyear",
+                "FamilyName": "陆八魔",
+                "PersonalName": "爱露",
+            },
+            {
+                "Id": 10089,
+                "Name": "爱露（礼服）",
+                "PathName": "aru_dress",
+                "FamilyName": "陆八魔",
+                "PersonalName": "爱露",
+            },
+            {
+                "Id": 10005,
+                "Name": "星野",
+                "PathName": "hoshino",
+                "FamilyName": "小鸟游",
+                "PersonalName": "星野",
+            },
+            {
+                "Id": 10045,
+                "Name": "星野（泳装）",
+                "PathName": "hoshino_swimsuit",
+                "FamilyName": "小鸟游",
+                "PersonalName": "星野",
+            },
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(return_value=students)
+
+            aru_candidates = await client.search_student_candidates("啊露", "cn")
+            newyear = await client.search_student_candidates("和服爱露", "cn")
+            dress = await client.search_student_candidates("礼服爱露", "cn")
+            hoshino_candidates = await client.search_student_candidates(
+                "水星野", "cn"
+            )
+
+        self.assertEqual(
+            {candidate["Id"] for candidate in aru_candidates},
+            {10000, 10031, 10089},
+        )
+        self.assertEqual(
+            {candidate["Id"] for candidate in newyear},
+            {10000, 10031, 10089},
+        )
+        self.assertEqual(
+            {candidate["Id"] for candidate in dress},
+            {10000, 10031, 10089},
+        )
+        self.assertEqual(
+            {candidate["Id"] for candidate in hoshino_candidates},
+            {10005, 10045},
+        )
+
+    async def test_search_uses_user_configured_alias_and_exposes_top_identities(self):
+        students = [
+            {
+                "Id": 10000,
+                "Name": "爱露",
+                "PathName": "aru",
+                "FamilyName": "陆八魔",
+                "PersonalName": "爱露",
+            },
+            {
+                "Id": 10089,
+                "Name": "爱露（礼服）",
+                "PathName": "aru_dress",
+                "FamilyName": "陆八魔",
+                "PersonalName": "爱露",
+            },
+            {
+                "Id": 10005,
+                "Name": "星野",
+                "PathName": "hoshino",
+                "FamilyName": "小鸟游",
+                "PersonalName": "星野",
+            },
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.student_aliases = {"社长": "爱露"}
+            client.get_students = AsyncMock(return_value=students)
+
+            candidates = await client.search_student_candidates("社长", "cn")
+
+        self.assertEqual({student["Id"] for student in candidates}, {10000, 10089})
+        self.assertEqual(candidates.ranked_identities[0]["name"], "爱露")
+        self.assertEqual(
+            candidates.ranked_identities[0]["variants"],
+            ["爱露", "爱露（礼服）"],
+        )
+        self.assertEqual(candidates.ranked_identities[1]["name"], "星野")
+
+    async def test_search_derives_unlisted_variant_from_cached_student_relations(self):
+        students = [
+            {"Id": 10, "Name": "Nia", "PathName": "nia"},
+            {
+                "Id": 11,
+                "Name": "Nia",
+                "PathName": "nia_festival",
+            },
+            {"Id": 20, "Name": "Mika", "PathName": "mika"},
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(return_value=students)
+
+            candidates = await client.search_student_candidates("Festival Nia", "cn")
+            student = await client.search_student("Festival Nia", "cn")
+
+        self.assertEqual({candidate["Id"] for candidate in candidates}, {10, 11})
+        self.assertEqual(candidates.primary_name, "Nia")
+        self.assertEqual(student["Id"], 11)
+        self.assertIn("festival", candidates.variant_terms)
+
+    async def test_student_search_index_is_reused_while_cached_data_is_unchanged(self):
+        students = [
+            {
+                "Id": 10000,
+                "Name": "爱露",
+                "PathName": "aru",
+                "FamilyName": "陆八魔",
+                "PersonalName": "爱露",
+            },
+            {
+                "Id": 10089,
+                "Name": "爱露（礼服）",
+                "PathName": "aru_dress",
+                "FamilyName": "陆八魔",
+                "PersonalName": "爱露",
+            },
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(return_value=students)
+            with patch.object(
+                client,
+                "_build_student_search_index",
+                wraps=client._build_student_search_index,
+            ) as build_index:
+                await client.search_student_candidates("爱露", "cn")
+                await client.search_student_candidates("礼服爱露", "cn")
+
+        build_index.assert_called_once()
+
+    async def test_student_search_index_rebuilds_when_source_cache_changes(self):
+        students = [
+            {
+                "Id": 10000,
+                "Name": "爱露",
+                "PathName": "aru",
+                "FamilyName": "陆八魔",
+                "PersonalName": "爱露",
+            }
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(return_value=students)
+            cache_path = client._cache_path("cn", "students")
+            cache_path.write_text("first", encoding="utf-8")
+            with patch.object(
+                client,
+                "_build_student_search_index",
+                wraps=client._build_student_search_index,
+            ) as build_index:
+                await client.search_student_candidates("爱露", "cn")
+                cache_path.write_text("changed source cache", encoding="utf-8")
+                await client.search_student_candidates("爱露", "cn")
+
+        self.assertEqual(build_index.call_count, 2)
+
+    async def test_search_suggests_nearby_students_for_confirmation(self):
+        students = [
+            {
+                "Id": 1,
+                "Name": "星野",
+                "PathName": "hoshino",
+                "FamilyName": "小鸟游",
+                "PersonalName": "星野",
+            },
+            {
+                "Id": 2,
+                "Name": "星野（泳装）",
+                "PathName": "hoshino_swimsuit",
+                "FamilyName": "小鸟游",
+                "PersonalName": "星野",
+            },
+            {
+                "Id": 3,
+                "Name": "日鞠",
+                "PathName": "himari",
+                "FamilyName": "明星",
+                "PersonalName": "日鞠",
+            },
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(return_value=students)
+
+            candidates = await client.search_student_candidates("星也", "cn")
+
+        self.assertEqual(
+            {candidate["Id"] for candidate in candidates},
+            {1, 2},
+        )
+        self.assertTrue(candidates.needs_confirmation)
+        self.assertEqual(candidates.recommendations, [])
+
+    async def test_search_recommends_similar_student_identities_not_their_forms(self):
+        students = [
+            {
+                "Id": 1,
+                "Name": "星野",
+                "PathName": "hoshino",
+                "FamilyName": "小鸟游",
+                "PersonalName": "星野",
+            },
+            {
+                "Id": 2,
+                "Name": "星野（泳装）",
+                "PathName": "hoshino_swimsuit",
+                "FamilyName": "小鸟游",
+                "PersonalName": "星野",
+            },
+            {
+                "Id": 3,
+                "Name": "星野子",
+                "PathName": "hoshino_child",
+                "FamilyName": "小鸟游",
+                "PersonalName": "星野子",
+            },
+            {
+                "Id": 4,
+                "Name": "星野子（礼服）",
+                "PathName": "hoshino_child_dress",
+                "FamilyName": "小鸟游",
+                "PersonalName": "星野子",
+            },
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(return_value=students)
+
+            candidates = await client.search_student_candidates("星野", "cn")
+
+        self.assertEqual([candidate["Id"] for candidate in candidates], [1, 2])
+        self.assertEqual(candidates.recommendations, ["星野子"])
+
     async def test_search_reports_ambiguous_skin_match(self):
         with TemporaryDirectory() as temp_dir:
             client = SchaleDBClient(temp_dir)
@@ -430,14 +756,14 @@ class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
 
             candidates = await client.search_student_candidates("爱丽丝", "cn")
 
-        self.assertEqual([item["Id"] for item in candidates], [1, 2])
+        self.assertEqual([item["Id"] for item in candidates], [1, 2, 3])
         self.assertEqual(
             [item["Name"] for item in candidates],
-            ["爱丽丝", "爱丽丝（女仆）"],
+            ["爱丽丝", "爱丽丝（女仆）", "Alice (Tactical)"],
         )
         self.assertEqual(
             [item["_data_source_language"] for item in candidates],
-            ["cn", "cn"],
+            ["cn", "cn", "en"],
         )
         self.assertEqual(
             [call.args[0] for call in client.get_students.await_args_list],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from difflib import SequenceMatcher
 import hashlib
 import json
 import re
@@ -28,6 +29,48 @@ class StudentAmbiguousError(SchaleDBError):
         super().__init__(f"「{query}」匹配到多个学生。")
 
 
+class StudentSuggestionError(StudentAmbiguousError):
+    """Raised when only approximate student matches can be suggested."""
+
+    def __init__(self, query: str, candidates: list[dict[str, Any]]):
+        self.query = query
+        self.candidates = candidates
+        names = [
+            str(student.get("Name") or student.get("PathName") or student.get("Id"))
+            for student in candidates
+        ]
+        suggestions = "、".join(dict.fromkeys(names))
+        super().__init__(query, candidates)
+        self.args = (
+            f"「{query}」没有直接匹配，可能是：{suggestions}。请确认后选择。",
+        )
+
+
+class StudentCandidateMatches(list[dict[str, Any]]):
+    """All forms of the best-matching student plus other likely identities."""
+
+    def __init__(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        primary_name: str,
+        recommendations: list[str],
+        needs_confirmation: bool,
+        ranked_identities: list[dict[str, Any]] | None = None,
+        variant_terms: set[str] | None = None,
+        variant_terms_by_id: dict[int, set[str]] | None = None,
+        base_student_ids: set[int] | None = None,
+    ):
+        super().__init__(candidates)
+        self.primary_name = primary_name
+        self.recommendations = recommendations
+        self.needs_confirmation = needs_confirmation
+        self.ranked_identities = ranked_identities or []
+        self.variant_terms = variant_terms or set()
+        self.variant_terms_by_id = variant_terms_by_id or {}
+        self.base_student_ids = base_student_ids or set()
+
+
 class SchaleDBClient:
     """Fetch and cache SchaleDB student records and their render assets."""
 
@@ -42,6 +85,30 @@ class SchaleDBClient:
         "christmas": "圣诞",
         "cheerleader": "应援团",
         "track": "运动服",
+        "dress": "礼服",
+        "hot_spring": "温泉",
+        "uniform": "制服",
+        "battle_tank": "武装",
+        "battle_dealer": "武装",
+    }
+    VARIANT_SEARCH_LABELS = {
+        "泳装": ("swimsuit", "水着"),
+        "新年": ("newyear", "new year", "和服"),
+        "赛车": ("racing",),
+        "兔女郎": ("bunny",),
+        "女仆": ("maid",),
+        "圣诞": ("christmas",),
+        "应援团": ("cheerleader",),
+        "运动服": ("track",),
+        "礼服": ("dress",),
+        "温泉": ("hot spring", "hotspring"),
+        "制服": ("uniform",),
+        "武装": ("battle", "tactical", "临战"),
+    }
+    STUDENT_SEARCH_ALIASES = {
+        "啊露": "爱露",
+        "阿露": "爱露",
+        "水星野": "星野",
     }
     SCHOOLS_WITH_GENERIC_ICON = {"Sakugawa"}
     HEADERS = {
@@ -72,6 +139,13 @@ class SchaleDBClient:
         self._session: aiohttp.ClientSession | None = None
         self.last_error: str | None = None
         self.asset_errors: dict[str, str] = {}
+        self.student_aliases: dict[str, str] = {}
+        self._dataset_memory_cache: dict[
+            tuple[str, str], tuple[tuple[int, int, int] | None, Any]
+        ] = {}
+        self._student_search_index_cache: tuple[
+            tuple[Any, ...], dict[str, Any]
+        ] | None = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -134,6 +208,14 @@ class SchaleDBClient:
     def _cache_path(self, language: str, resource: str) -> Path:
         return self.data_dir / f"{language}_{resource}.json"
 
+    @staticmethod
+    def _file_signature(path: Path) -> tuple[int, int, int] | None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size, getattr(stat, "st_ino", 0)
+
     def _read_dataset_cache(self, path: Path) -> Any | None:
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -142,10 +224,31 @@ class SchaleDBClient:
 
     async def _fetch_dataset(self, resource: str, language: str) -> Any:
         path = self._cache_path(language, resource)
+        cache_key = (language, resource)
+        file_signature = self._file_signature(path)
+        memory_entry = self._dataset_memory_cache.get(cache_key)
+        if (
+            memory_entry is not None
+            and memory_entry[0] == file_signature
+            and file_signature is not None
+            and file_signature[0] / 1_000_000_000 + self.data_ttl_seconds
+            > time.time()
+        ):
+            return memory_entry[1]
+
         cached = self._read_dataset_cache(path)
         if cached is not None:
             try:
-                if path.stat().st_mtime + self.data_ttl_seconds > time.time():
+                file_signature = self._file_signature(path)
+                if (
+                    file_signature is not None
+                    and file_signature[0] / 1_000_000_000 + self.data_ttl_seconds
+                    > time.time()
+                ):
+                    self._dataset_memory_cache[cache_key] = (
+                        file_signature,
+                        cached,
+                    )
                     return cached
             except OSError:
                 cached = None
@@ -169,6 +272,10 @@ class SchaleDBClient:
                 temporary.replace(path)
             finally:
                 temporary.unlink(missing_ok=True)
+            self._dataset_memory_cache[cache_key] = (
+                self._file_signature(path),
+                payload,
+            )
             return payload
         except (
             aiohttp.ClientError,
@@ -177,9 +284,16 @@ class SchaleDBClient:
             OSError,
             ValueError,
         ) as exc:
-            if cached is not None:
+            fallback = cached
+            if fallback is None and memory_entry is not None:
+                fallback = memory_entry[1]
+            if fallback is not None:
                 self.last_error = f"{exc}; using cached {resource} data"
-                return cached
+                self._dataset_memory_cache[cache_key] = (
+                    self._file_signature(path),
+                    fallback,
+                )
+                return fallback
             if isinstance(exc, SchaleDBError):
                 raise
             raise SchaleDBError(f"Unable to fetch SchaleDB {resource}: {exc}") from exc
@@ -194,6 +308,166 @@ class SchaleDBClient:
     def _normalize_name(value: str) -> str:
         value = value.strip().lower().replace("（", "(").replace("）", ")")
         return re.sub(r"\s+", "", value)
+
+    @classmethod
+    def _canonical_search_name(cls, value: str) -> str:
+        normalized = cls._normalize_name(value)
+        normalized = re.sub(r"[()（）\[\]【】_\-·・]", "", normalized)
+        labels = sorted(
+            (
+                (alias, canonical)
+                for canonical, aliases in cls.VARIANT_SEARCH_LABELS.items()
+                for alias in (canonical, *aliases)
+            ),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        )
+        for label, canonical in labels:
+            if normalized.startswith(label) and len(normalized) > len(label):
+                return f"{normalized[len(label):]}{canonical}"
+        return normalized
+
+    @classmethod
+    def _name_without_separators(cls, value: str) -> str:
+        normalized = cls._normalize_name(value)
+        return re.sub(r"[()（）\[\]【】_\-·・]", "", normalized)
+
+    def _expand_student_aliases(self, value: str) -> str:
+        normalized = self._normalize_name(value)
+        aliases = {**self.STUDENT_SEARCH_ALIASES, **self.student_aliases}
+        for alias, canonical in sorted(
+            aliases.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            normalized = normalized.replace(
+                self._normalize_name(alias), self._normalize_name(canonical)
+            )
+        return normalized
+
+    @classmethod
+    def _variant_search_parts(
+        cls, value: str, data_driven_variants: set[str] | None = None
+    ) -> tuple[str, str] | None:
+        normalized = cls._name_without_separators(value)
+        for label, aliases in cls.VARIANT_SEARCH_LABELS.items():
+            for variant in (label, *aliases):
+                if normalized.startswith(variant) and len(normalized) > len(variant):
+                    return normalized[len(variant):], label
+                if normalized.endswith(variant) and len(normalized) > len(variant):
+                    return normalized[:-len(variant)], label
+        for variant in sorted(data_driven_variants or (), key=len, reverse=True):
+            if normalized.startswith(variant) and len(normalized) > len(variant):
+                return normalized[len(variant):], variant
+            if normalized.endswith(variant) and len(normalized) > len(variant):
+                return normalized[:-len(variant)], variant
+        return None
+
+    @classmethod
+    def _canonical_variant_term(cls, value: str) -> str:
+        normalized = cls._name_without_separators(value)
+        for label, aliases in cls.VARIANT_SEARCH_LABELS.items():
+            if normalized in {
+                cls._name_without_separators(alias)
+                for alias in (label, *aliases)
+            }:
+                return label
+        return normalized
+
+    @classmethod
+    def _derive_variant_term(cls, form_name: str, base_name: str) -> str | None:
+        form = cls._name_without_separators(form_name)
+        base = cls._name_without_separators(base_name)
+        if not form or not base or form == base:
+            return None
+        if form.startswith(base):
+            term = form[len(base):]
+        elif form.endswith(base):
+            term = form[:-len(base)]
+        else:
+            return None
+        if len(term) < 2 or (term.isascii() and term.isalpha() and len(term) < 3):
+            return None
+        return cls._canonical_variant_term(term)
+
+    @classmethod
+    def _student_search_group_key(
+        cls, student: dict[str, Any], path_names: set[str] | None = None
+    ) -> str:
+        family = student.get("FamilyName")
+        personal = student.get("PersonalName")
+        if isinstance(family, str) and family and isinstance(personal, str) and personal:
+            return f"person:{cls._normalize_name(family + personal)}"
+
+        path_name = str(student.get("PathName") or "").lower()
+        path_parts = path_name.split("_")
+        known_paths = path_names or set()
+        matching_roots = [
+            "_".join(path_parts[:index])
+            for index in range(1, len(path_parts))
+            if "_".join(path_parts[:index]) in known_paths
+        ]
+        if matching_roots:
+            return f"path:{max(matching_roots, key=len)}"
+
+        suffixes = sorted(
+            (*cls.VARIANT_LABELS, "tactical", "new_year", "hotspring"),
+            key=len,
+            reverse=True,
+        )
+        for suffix in suffixes:
+            marker = f"_{suffix}"
+            if path_name.endswith(marker):
+                path_name = path_name[: -len(marker)]
+                break
+        if path_name:
+            return f"path:{path_name}"
+        name = str(student.get("Name") or "")
+        variant_parts = cls._variant_search_parts(name)
+        if variant_parts:
+            return f"name:{variant_parts[0]}"
+        return f"name:{cls._canonical_search_name(name)}"
+
+    @classmethod
+    def _fuzzy_search_names(
+        cls, student: dict[str, Any], data_driven_variants: set[str]
+    ) -> set[tuple[str, float]]:
+        family = student.get("FamilyName")
+        personal = student.get("PersonalName")
+        weighted_names: list[tuple[str, float]] = []
+        for field in ("Name", "PersonalName"):
+            value = student.get(field)
+            if isinstance(value, str) and value:
+                weighted_names.append((value, 1.0))
+        if isinstance(family, str) and family and isinstance(personal, str) and personal:
+            weighted_names.append((family + personal, 0.9))
+        if isinstance(family, str) and family:
+            weighted_names.append((family, 0.7))
+        search_tags = student.get("SearchTags")
+        if isinstance(search_tags, list):
+            weighted_names.extend(
+                (tag, 0.9)
+                for tag in search_tags
+                if isinstance(tag, str) and tag
+            )
+        for field in ("DevName", "PathName"):
+            value = student.get(field)
+            if isinstance(value, str) and value:
+                weighted_names.append((value, 0.5))
+
+        result = set()
+        for value, weight in weighted_names:
+            candidate = cls._canonical_search_name(value)
+            variant_parts = cls._variant_search_parts(
+                candidate, data_driven_variants
+            )
+            result.add(
+                (
+                    cls._canonical_search_name(
+                        variant_parts[0] if variant_parts else candidate
+                    ),
+                    weight,
+                )
+            )
+        return result
 
     @staticmethod
     def _search_names(student: dict[str, Any]) -> list[str]:
@@ -304,10 +578,213 @@ class SchaleDBClient:
                 record["Name"] = variant_name
         return record
 
+    def _build_student_search_index(
+        self,
+        students_by_language: dict[str, list[dict[str, Any]]],
+        language: str,
+        source_languages: list[str],
+    ) -> dict[str, Any]:
+        students_by_id: dict[str, dict[int, dict[str, Any]]] = {
+            source_language: {
+                int(student["Id"]): student
+                for student in students
+                if student.get("Id") is not None
+            }
+            for source_language, students in students_by_language.items()
+        }
+        preferred_records: dict[int, dict[str, Any]] = {}
+        display_languages = list(dict.fromkeys((language, "cn", "en", "jp")))
+        for source_language in ("cn", "en", "jp", *source_languages):
+            for student in students_by_language.get(source_language, []):
+                if student.get("Id") is not None:
+                    preferred_records.setdefault(int(student["Id"]), student)
+
+        display_records = {
+            student_id: next(
+                (
+                    students_by_id[candidate_language][student_id]
+                    for candidate_language in display_languages
+                    if student_id in students_by_id.get(candidate_language, {})
+                ),
+                student,
+            )
+            for student_id, student in preferred_records.items()
+        }
+        path_names = {
+            str(student.get("PathName") or "").lower()
+            for student in preferred_records.values()
+            if student.get("PathName")
+        }
+        group_student_ids: dict[str, set[int]] = {}
+        identity_records: dict[str, list[dict[str, Any]]] = {}
+        records_by_id: dict[int, list[dict[str, Any]]] = {}
+        names_by_id: dict[int, set[str]] = {}
+        group_by_id: dict[int, str] = {}
+
+        for student_id, preferred in preferred_records.items():
+            records = [
+                localized[student_id]
+                for localized in students_by_id.values()
+                if student_id in localized
+            ]
+            group_key = self._student_search_group_key(preferred, path_names)
+            group_by_id[student_id] = group_key
+            group_student_ids.setdefault(group_key, set()).add(student_id)
+            identity_records.setdefault(group_key, []).extend(records)
+            records_by_id[student_id] = records
+            names_by_id[student_id] = {
+                self._canonical_search_name(candidate)
+                for record in records
+                for candidate in self._search_names(record)
+                if candidate
+            }
+
+        localized_students = students_by_language.get(language, [])
+        if language == "cn":
+            for student in students_by_language.get("jp", []):
+                if student.get("Id") is None:
+                    continue
+                variant_name = self._localized_variant_name(
+                    student, localized_students, language
+                )
+                if variant_name:
+                    names_by_id.setdefault(int(student["Id"]), set()).add(
+                        self._canonical_search_name(variant_name)
+                    )
+
+        base_ids_by_group: dict[str, set[int]] = {}
+        variant_terms_by_group: dict[str, set[str]] = {}
+        variant_terms_by_id: dict[int, set[str]] = {}
+        fuzzy_names_by_id: dict[int, set[tuple[str, float]]] = {}
+        for group_key, student_ids in group_student_ids.items():
+            paths = {
+                student_id: str(
+                    preferred_records[student_id].get("PathName") or ""
+                ).lower()
+                for student_id in student_ids
+            }
+            shallowest_depth = min(
+                (path.count("_") for path in paths.values() if path),
+                default=0,
+            )
+            root_ids = {
+                student_id
+                for student_id, path in paths.items()
+                if path and path.count("_") == shallowest_depth
+            }
+            known_base_ids = {
+                student_id
+                for student_id in student_ids
+                if any(
+                    not self._variant_search_parts(str(record.get("Name") or ""))
+                    for record in records_by_id[student_id]
+                )
+            }
+            base_ids = root_ids or known_base_ids or set(student_ids)
+            base_ids_by_group[group_key] = base_ids
+            base_names_by_language: dict[str, set[str]] = {}
+            for student_id in base_ids:
+                for record in records_by_id[student_id]:
+                    record_language = next(
+                        (
+                            candidate_language
+                            for candidate_language, records in students_by_id.items()
+                            if records.get(student_id) is record
+                        ),
+                        "",
+                    )
+                    base_name = str(record.get("Name") or "")
+                    if base_name:
+                        base_names_by_language.setdefault(
+                            record_language, set()
+                        ).add(base_name)
+
+            for student_id in student_ids - base_ids:
+                terms = set()
+                for record in records_by_id[student_id]:
+                    record_language = next(
+                        (
+                            candidate_language
+                            for candidate_language, records in students_by_id.items()
+                            if records.get(student_id) is record
+                        ),
+                        "",
+                    )
+                    for base_name in base_names_by_language.get(record_language, ()):
+                        term = self._derive_variant_term(
+                            str(record.get("Name") or ""), base_name
+                        )
+                        if term:
+                            terms.add(term)
+                path = paths.get(student_id, "")
+                for base_id in base_ids:
+                    base_path = paths.get(base_id, "")
+                    if path.startswith(f"{base_path}_"):
+                        path_term = self._canonical_variant_term(
+                            path[len(base_path) + 1:]
+                        )
+                        if len(path_term) >= 2:
+                            terms.add(path_term)
+                if terms:
+                    variant_terms_by_id[student_id] = terms
+                    variant_terms_by_group.setdefault(group_key, set()).update(terms)
+
+            group_terms = variant_terms_by_group.get(group_key, set())
+            for student_id in student_ids:
+                for candidate in tuple(names_by_id[student_id]):
+                    parts = self._variant_search_parts(candidate, group_terms)
+                    if parts:
+                        names_by_id[student_id].add(
+                            self._canonical_search_name(parts[0])
+                        )
+                fuzzy_names_by_id[student_id] = {
+                    fuzzy_name
+                    for record in records_by_id[student_id]
+                    for fuzzy_name in self._fuzzy_search_names(record, group_terms)
+                }
+
+        data_driven_variants = {
+            term for terms in variant_terms_by_group.values() for term in terms
+        }
+        return {
+            "students_by_id": students_by_id,
+            "preferred_records": preferred_records,
+            "display_records": display_records,
+            "group_student_ids": group_student_ids,
+            "identity_records": identity_records,
+            "records_by_id": records_by_id,
+            "names_by_id": names_by_id,
+            "group_by_id": group_by_id,
+            "base_ids_by_group": base_ids_by_group,
+            "variant_terms_by_group": variant_terms_by_group,
+            "variant_terms_by_id": variant_terms_by_id,
+            "fuzzy_names_by_id": fuzzy_names_by_id,
+            "data_driven_variants": data_driven_variants,
+        }
+
+    def _student_search_index_signature(
+        self,
+        students_by_language: dict[str, list[dict[str, Any]]],
+        source_languages: list[str],
+        language: str,
+    ) -> tuple[Any, ...]:
+        signatures = []
+        for source_language in source_languages:
+            file_signature = self._file_signature(
+                self._cache_path(source_language, "students")
+            )
+            fallback_identity = (
+                id(students_by_language.get(source_language))
+                if file_signature is None
+                else None
+            )
+            signatures.append((source_language, file_signature, fallback_identity))
+        return (language, tuple(signatures))
+
     async def search_student_candidates(
         self, name: str, language: str = "cn"
     ) -> list[dict[str, Any]]:
-        query = self._normalize_name(name)
+        query = self._expand_student_aliases(name)
         if not query:
             raise SchaleDBError("请输入学生名称。")
 
@@ -336,79 +813,90 @@ class SchaleDBClient:
             )
         self.last_error = "；".join((*fallback_notices, *errors)) or None
 
-        students_by_id: dict[str, dict[int, dict[str, Any]]] = {
-            source_language: {
-                int(student["Id"]): student
-                for student in students
-                if student.get("Id") is not None
-            }
-            for source_language, students in students_by_language.items()
-        }
-        names_by_id: dict[int, set[str]] = {}
-        for students in students_by_language.values():
-            for student in students:
-                if student.get("Id") is None:
-                    continue
-                student_id = int(student["Id"])
-                names_by_id.setdefault(student_id, set()).update(
-                    self._normalize_name(candidate)
-                    for candidate in self._search_names(student)
-                    if candidate
-                )
-        localized_students = students_by_language.get(language, [])
-        if language == "cn":
-            for student in students_by_language.get("jp", []):
-                if student.get("Id") is None:
-                    continue
-                variant_name = self._localized_variant_name(
-                    student, localized_students, language
-                )
-                if variant_name:
-                    names_by_id.setdefault(int(student["Id"]), set()).add(
-                        self._normalize_name(variant_name)
-                    )
-
-        exact: set[int] = set()
-        scored: list[tuple[int, int, int]] = []
-        base_query = re.sub(r"\([^)]*\)", "", query)
-        for student_id, names in names_by_id.items():
-            if query in names:
-                exact.add(student_id)
-                continue
-            score = (
-                max(
-                    (
-                        700
-                        if candidate.startswith(query)
-                        else 600
-                        if query in candidate
-                        else 400
-                        if base_query and candidate == base_query
-                        else 0
-                    )
-                    for candidate in names
-                )
-                if names
-                else 0
+        index_signature = self._student_search_index_signature(
+            students_by_language, source_languages, language
+        )
+        if (
+            self._student_search_index_cache is not None
+            and self._student_search_index_cache[0] == index_signature
+        ):
+            search_index = self._student_search_index_cache[1]
+        else:
+            search_index = self._build_student_search_index(
+                students_by_language, language, source_languages
             )
-            if score:
-                scored.append((score, -min(map(len, names)), student_id))
+            self._student_search_index_cache = (index_signature, search_index)
+        students_by_id = search_index["students_by_id"]
+        display_records = search_index["display_records"]
+        group_student_ids = search_index["group_student_ids"]
+        identity_records = search_index["identity_records"]
+        names_by_id = search_index["names_by_id"]
+        group_by_id = search_index["group_by_id"]
+        base_ids_by_group = search_index["base_ids_by_group"]
+        variant_terms_by_group = search_index["variant_terms_by_group"]
+        variant_terms_by_id = search_index["variant_terms_by_id"]
+        data_driven_variants = search_index["data_driven_variants"]
+        normalized_query = self._expand_student_aliases(name)
+        variant_query = self._variant_search_parts(
+            normalized_query, data_driven_variants
+        )
+        query_base = self._canonical_search_name(
+            variant_query[0] if variant_query else normalized_query
+        )
+        if not query_base:
+            raise SchaleDBError("请输入学生名称。")
 
-        matches = exact
-        if not matches and scored:
-            best_score = max((score, length) for score, length, _ in scored)
-            matches = {
-                student_id
-                for score, length, student_id in scored
-                if (score, length) == best_score
-            }
+        group_scores: dict[str, float] = {}
+        for student_id, names in names_by_id.items():
+            group_key = group_by_id[student_id]
+            group_variants = variant_terms_by_group.get(group_key, set())
 
-        if not matches:
+            direct_score = 0.0
+            for candidate in names:
+                candidate_parts = self._variant_search_parts(
+                    candidate, group_variants
+                )
+                candidate_base = self._canonical_search_name(
+                    candidate_parts[0] if candidate_parts else candidate
+                )
+                if not candidate_base:
+                    continue
+                if candidate_base == query_base:
+                    direct_score = max(direct_score, 1.0)
+                elif candidate_base.startswith(query_base):
+                    direct_score = max(direct_score, 0.82)
+                elif query_base in candidate_base or candidate_base in query_base:
+                    direct_score = max(direct_score, 0.72)
+
+            fuzzy_score = max(
+                (
+                    SequenceMatcher(None, query_base, candidate).ratio() * weight
+                    for candidate, weight in search_index["fuzzy_names_by_id"][
+                        student_id
+                    ]
+                ),
+                default=0.0,
+            )
+            group_scores[group_key] = max(
+                group_scores.get(group_key, 0.0), direct_score, fuzzy_score
+            )
+
+        ranked_groups = sorted(
+            group_scores.items(), key=lambda item: (-item[1], item[0])
+        )
+        if not ranked_groups or ranked_groups[0][1] < 0.5:
             raise SchaleDBError(f"SchaleDB 中没有找到学生「{name}」。")
 
-        display_languages = list(dict.fromkeys((language, "cn", "en", "jp")))
-        candidates = []
-        for student_id in matches:
+        primary_group, primary_score = ranked_groups[0]
+        if primary_score < 0.72 and len(query_base) < 2:
+            raise SchaleDBError(f"SchaleDB 中没有找到学生「{name}」。")
+
+        primary_ids = group_student_ids[primary_group]
+        needs_confirmation = primary_score < 1.0
+        source_priority = {value: index for index, value in enumerate(source_languages)}
+        display_priority = list(dict.fromkeys((language, "cn", "en", "jp")))
+
+        def display_student_record(student_id: int) -> dict[str, Any] | None:
             source_language = next(
                 (
                     candidate_language
@@ -418,12 +906,12 @@ class SchaleDBClient:
                 None,
             )
             if source_language is None:
-                continue
+                return None
             source = students_by_id[source_language][student_id]
             display_language = next(
                 (
                     candidate_language
-                    for candidate_language in display_languages
+                    for candidate_language in display_priority
                     if student_id in students_by_id.get(candidate_language, {})
                 ),
                 source_language,
@@ -444,22 +932,154 @@ class SchaleDBClient:
                     record["Name"] = variant_name
             record["_data_source_language"] = source_language
             record["_display_language"] = display_language
-            candidates.append(record)
+            return record
 
-        source_priority = {value: index for index, value in enumerate(source_languages)}
-        candidates.sort(
-            key=lambda student: (
-                source_priority.get(
-                    student["_data_source_language"], len(source_priority)
-                ),
-                str(student.get("Name") or student.get("PathName") or "").casefold(),
-                int(student.get("Id") or 0),
+        ranked_identities = []
+        for index, (group_key, score) in enumerate(ranked_groups[:5], start=1):
+            ids = group_student_ids[group_key]
+            forms = [
+                record
+                for student_id in ids
+                if (record := display_student_record(student_id)) is not None
+            ]
+            forms.sort(
+                key=lambda student: (
+                    bool(
+                        self._variant_search_parts(
+                            str(student.get("Name") or ""),
+                            variant_terms_by_group.get(group_key, set()),
+                        )
+                    ),
+                    source_priority.get(
+                        student["_data_source_language"], len(source_priority)
+                    ),
+                    str(student.get("Name") or student.get("PathName") or "").casefold(),
+                    int(student.get("Id") or 0),
+                )
             )
+            ranked_identities.append(
+                {
+                    "candidate_id": str(index),
+                    "name": self._identity_display_name(
+                        identity_records[group_key],
+                        display_records,
+                        ids,
+                        base_ids_by_group.get(group_key),
+                    ),
+                    "local_score": round(score * 100),
+                    "variants": list(
+                        dict.fromkeys(
+                            str(record.get("Name") or record.get("PathName") or "")
+                            for record in forms
+                        )
+                    ),
+                    "forms": forms,
+                }
+            )
+
+        recommendations = [
+            identity["name"]
+            for identity, (_, score) in zip(ranked_identities[1:], ranked_groups[1:])
+            if score >= max(0.5, primary_score - 0.2)
+        ][:3]
+        recommendations = list(dict.fromkeys(recommendations))
+        candidates = ranked_identities[0]["forms"]
+        primary_name = self._identity_display_name(
+            identity_records[primary_group],
+            display_records,
+            primary_ids,
+            base_ids_by_group.get(primary_group),
         )
-        return candidates
+        return StudentCandidateMatches(
+            candidates,
+            primary_name=primary_name,
+            recommendations=recommendations,
+            needs_confirmation=needs_confirmation,
+            ranked_identities=ranked_identities,
+            variant_terms=data_driven_variants,
+            variant_terms_by_id=variant_terms_by_id,
+            base_student_ids=base_ids_by_group.get(primary_group, set()),
+        )
+
+    @classmethod
+    def _identity_display_name(
+        cls,
+        records: list[dict[str, Any]],
+        display_records: dict[int, dict[str, Any]],
+        student_ids: set[int],
+        base_student_ids: set[int] | None = None,
+    ) -> str:
+        if base_student_ids:
+            base_records = [
+                display_records[student_id]
+                for student_id in base_student_ids
+                if student_id in display_records
+            ]
+            if base_records:
+                student = min(
+                    base_records, key=lambda record: int(record.get("Id") or 0)
+                )
+                return str(student.get("Name") or student.get("PersonalName") or "")
+        preferred = [
+            display_records[student_id]
+            for student_id in student_ids
+            if student_id in display_records
+        ]
+        base_records = [
+            record
+            for record in preferred
+            if not cls._variant_search_parts(str(record.get("Name") or ""))
+        ]
+        candidates = base_records or preferred or records
+        if candidates:
+            student = min(
+                candidates,
+                key=lambda record: int(record.get("Id") or 0),
+            )
+            return str(student.get("Name") or student.get("PersonalName") or "")
+        return ""
 
     async def search_student(self, name: str, language: str = "cn") -> dict[str, Any]:
         candidates = await self.search_student_candidates(name, language)
+        variant_query = self._variant_search_parts(
+            self._expand_student_aliases(name),
+            getattr(candidates, "variant_terms", set()),
+        )
+        if variant_query:
+            requested_variant = variant_query[1]
+
+            def matches_requested_variant(candidate: dict[str, Any]) -> bool:
+                student_id = int(candidate.get("Id") or 0)
+                if requested_variant in getattr(
+                    candidates, "variant_terms_by_id", {}
+                ).get(student_id, set()):
+                    return True
+                candidate_variant = self._variant_search_parts(
+                    str(candidate.get("Name") or ""),
+                    getattr(candidates, "variant_terms", set()),
+                )
+                return bool(
+                    candidate_variant
+                    and candidate_variant[1] == requested_variant
+                )
+
+            matching_variants = [
+                candidate for candidate in candidates
+                if matches_requested_variant(candidate)
+            ]
+            if len(matching_variants) == 1:
+                return matching_variants[0]
+            if matching_variants:
+                candidates = matching_variants
+        else:
+            base_candidates = [
+                candidate
+                for candidate in candidates
+                if int(candidate.get("Id") or 0)
+                in getattr(candidates, "base_student_ids", set())
+            ]
+            if len(base_candidates) == 1:
+                return base_candidates[0]
         if len(candidates) > 1:
             raise StudentAmbiguousError(name, candidates)
         return candidates[0]

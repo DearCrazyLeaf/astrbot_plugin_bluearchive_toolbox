@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import threading
 import time
@@ -14,6 +15,9 @@ if str(PLUGIN_PARENT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_PARENT))
 
 main_module = importlib.import_module("astrbot_plugin_bluearchive_toolbox.main")
+StudentCandidateMatches = importlib.import_module(
+    "astrbot_plugin_bluearchive_toolbox.api_clients.schaledb_client"
+).StudentCandidateMatches
 BAToolbox = main_module.BAToolbox
 
 
@@ -115,6 +119,18 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.plugin._get_command("detail_query", ["学生"]),
             ["学生卡", "学生", "ba_student"],
         )
+
+    def test_reads_user_aliases_from_student_search_settings(self):
+        self.plugin.config["student_search_settings"] = {
+            "custom_aliases": ["啊露=爱露", "泳装星野=星野", "无效条目"],
+            "llm_enabled": True,
+        }
+
+        self.assertEqual(
+            self.plugin._student_search_aliases(),
+            {"啊露": "爱露", "泳装星野": "星野"},
+        )
+        self.assertTrue(self.plugin._student_llm_enabled())
 
     def test_command_triggers_support_plain_and_slash_forms(self):
         commands = ["学生", "ba_student"]
@@ -226,6 +242,36 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("至少一部分学生名称", results[0])
         self.assertIn("用法：/学生卡 <学生名>", results[0])
 
+    async def test_student_detail_asks_confirmation_for_approximate_suggestions(self):
+        plugin = BAToolbox.__new__(BAToolbox)
+        plugin.config = {"basic_settings": {"student_data_language": "cn"}}
+        candidates = StudentCandidateMatches(
+            [{"Id": 1, "Name": "星野"}, {"Id": 2, "Name": "星野（泳装）"}],
+            primary_name="星野",
+            recommendations=["日鞠"],
+            needs_confirmation=True,
+        )
+        plugin._schaledb_client = SimpleNamespace(
+            search_student_candidates=AsyncMock(return_value=candidates)
+        )
+        plugin._start_student_choice = AsyncMock(return_value=(True, "菜单"))
+        event = SimpleNamespace(unified_msg_origin="", plain_result=lambda text: text)
+
+        results = [
+            result async for result in plugin._handle_student_detail(event, "星也")
+        ]
+
+        plugin._start_student_choice.assert_awaited_once_with(
+            event,
+            "星也",
+            candidates,
+            "cn",
+            suggestions=True,
+            primary_name="星野",
+            recommendations=["日鞠"],
+        )
+        self.assertEqual(results, [])
+
     async def test_guide_command_without_student_name_prompts_for_partial_name(self):
         plugin = BAToolbox.__new__(BAToolbox)
         plugin.config = {"command_settings": {"guide_query": ["学生攻略"]}}
@@ -263,6 +309,35 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
         plugin._arona_client.get_guide_image.assert_awaited_once_with("爱丽丝")
         self.assertEqual(results, [("image", "https://example.test/guide.png")])
 
+    async def test_guide_asks_confirmation_for_approximate_student_suggestions(self):
+        plugin = BAToolbox.__new__(BAToolbox)
+        plugin.config = {"basic_settings": {"student_data_language": "cn"}}
+        candidates = StudentCandidateMatches(
+            [{"Id": 1, "Name": "星野"}, {"Id": 2, "Name": "星野（泳装）"}],
+            primary_name="星野",
+            recommendations=["日鞠"],
+            needs_confirmation=True,
+        )
+        plugin._schaledb_client = SimpleNamespace(
+            search_student_candidates=AsyncMock(return_value=candidates)
+        )
+        plugin._start_student_choice = AsyncMock(return_value=(True, "菜单"))
+        event = SimpleNamespace(unified_msg_origin="", plain_result=lambda text: text)
+
+        results = [result async for result in plugin._handle_guide(event, "星也")]
+
+        plugin._start_student_choice.assert_awaited_once_with(
+            event,
+            "星也",
+            candidates,
+            "cn",
+            query_mode="guide",
+            suggestions=True,
+            primary_name="星野",
+            recommendations=["日鞠"],
+        )
+        self.assertEqual(results, [])
+
     async def test_ambiguous_guide_search_starts_guide_candidate_menu(self):
         plugin = BAToolbox.__new__(BAToolbox)
         plugin.config = {"basic_settings": {"student_data_language": "cn"}}
@@ -284,6 +359,9 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
             candidates,
             "cn",
             query_mode="guide",
+            suggestions=False,
+            primary_name="",
+            recommendations=[],
         )
         self.assertEqual(results, [])
 
@@ -629,12 +707,20 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(main_module.asyncio, "sleep", new_callable=AsyncMock):
             sent, prompt = await self.plugin._start_student_choice(
-                event, "亚子", candidates, "cn"
+                event,
+                "亚子",
+                candidates,
+                "cn",
+                primary_name="亚子",
+                recommendations=["爱丽丝"],
             )
 
         self.assertTrue(sent)
+        self.assertIn("最接近「亚子」", prompt)
         self.assertIn("1. 亚子（国服数据）", prompt)
         self.assertIn("2. 亚子（礼服）（国服数据）", prompt)
+        self.assertIn("其他相似角色", prompt)
+        self.assertIn("爱丽丝", prompt)
         self.assertIn("3. 取消查询", prompt)
         calls = bot.set_msg_emoji_like.await_args_list
         self.assertEqual(len(calls), 3)
@@ -644,6 +730,169 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         choice = self.plugin._student_candidate_menus["candidate-menu"]
         self.assertEqual(choice["emoji_map"], {"14": 0, "9": 1, "5": "cancel"})
+
+    async def test_student_choice_can_show_optional_llm_assistance(self):
+        self.plugin.config["student_search_settings"] = {"llm_enabled": True}
+        bot = SimpleNamespace(
+            send_group_msg=AsyncMock(return_value={"message_id": "candidate-menu"}),
+            set_msg_emoji_like=AsyncMock(),
+        )
+        event = SimpleNamespace(
+            bot=bot,
+            get_group_id=lambda: "123456",
+            get_sender_id=lambda: "789",
+        )
+        candidates = [{"Id": 1, "Name": "星野", "_data_source_language": "cn"}]
+
+        with patch.object(main_module.asyncio, "sleep", new_callable=AsyncMock):
+            sent, prompt = await self.plugin._start_student_choice(
+                event, "星也", candidates, "cn"
+            )
+
+        self.assertTrue(sent)
+        self.assertIn("大模型辅助匹配（可略微提升准确性）", prompt)
+        self.assertIn("3. 取消查询", prompt)
+        choice = self.plugin._student_candidate_menus["candidate-menu"]
+        self.assertEqual(choice["emoji_map"], {"14": 0, "9": "llm", "5": "cancel"})
+        self.assertEqual(self.plugin._match_student_choice(choice, "2"), "llm")
+        self.assertEqual(self.plugin._match_student_choice(choice, "3"), "cancel")
+
+    async def test_llm_ranking_uses_only_validated_local_candidates(self):
+        self.plugin.config["student_search_settings"] = {
+            "llm_enabled": True,
+            "llm_provider_id": "fast-model",
+        }
+        selected_forms = [
+            {"Id": 10000, "Name": "爱露", "_data_source_language": "cn"},
+            {"Id": 10089, "Name": "爱露（礼服）", "_data_source_language": "cn"},
+        ]
+        identities = [
+            {
+                "candidate_id": "1",
+                "name": "星野",
+                "local_score": 72,
+                "variants": ["星野", "星野（泳装）"],
+                "forms": [{"Id": 10005, "Name": "星野"}],
+            },
+            {
+                "candidate_id": "2",
+                "name": "爱露",
+                "local_score": 60,
+                "variants": ["爱露", "爱露（礼服）"],
+                "forms": selected_forms,
+            },
+        ]
+        response_text = json.dumps(
+            {
+                "ranking": [
+                    {"candidate_id": "2", "name": "爱露", "score": 96},
+                    {"candidate_id": "1", "name": "星野", "score": 71},
+                ]
+            },
+            ensure_ascii=False,
+        )
+        self.plugin.context = SimpleNamespace(
+            llm_generate=AsyncMock(
+                return_value=SimpleNamespace(completion_text=response_text)
+            )
+        )
+        choice = {
+            "token": "parent-token",
+            "group_id": "123456",
+            "user_id": "789",
+            "created_at": time.time(),
+            "timeout_seconds": 120,
+            "query": "礼服小春",
+            "query_mode": "detail",
+            "candidates": [],
+            "labels": [],
+            "language": "cn",
+            "message_id": "parent-menu",
+            "ranked_identities": identities,
+            "llm_enabled": True,
+        }
+        self.plugin._pending_student_queries[choice["token"]] = choice
+        self.plugin._student_choices_by_token[choice["token"]] = choice
+        self.plugin._student_candidate_menus[choice["message_id"]] = choice
+        bot = SimpleNamespace(
+            send_group_msg=AsyncMock(return_value={"message_id": "refined-menu"}),
+            set_msg_emoji_like=AsyncMock(),
+        )
+        event = SimpleNamespace(
+            bot=bot,
+            get_group_id=lambda: "123456",
+            get_sender_id=lambda: "789",
+            plain_result=lambda text: text,
+        )
+
+        with patch.object(main_module.asyncio, "sleep", new_callable=AsyncMock):
+            results = [
+                result
+                async for result in self.plugin._finish_student_choice(
+                    event, choice, "llm"
+                )
+            ]
+
+        self.assertIn("大模型认为最可能是「爱露」（参考匹配度 96%）", results[0])
+        self.assertIn("星野", results[0])
+        sent_prompt = bot.send_group_msg.await_args.kwargs["message"]
+        self.assertIn("爱露（礼服）", sent_prompt)
+        self.assertNotIn("星野（泳装）", sent_prompt)
+        self.assertNotIn(choice["token"], self.plugin._pending_student_queries)
+        refined_choice = next(
+            item
+            for item in self.plugin._pending_student_queries.values()
+            if item["message_id"] == "refined-menu"
+        )
+        self.assertEqual(
+            {student["Id"] for student in refined_choice["candidates"]},
+            {10000, 10089},
+        )
+
+    async def test_invalid_llm_ranking_keeps_original_candidate_menu(self):
+        self.plugin.config["student_search_settings"] = {
+            "llm_enabled": True,
+            "llm_provider_id": "fast-model",
+        }
+        self.plugin.context = SimpleNamespace(
+            llm_generate=AsyncMock(
+                return_value=SimpleNamespace(completion_text="not JSON")
+            )
+        )
+        choice = {
+            "token": "candidate-token",
+            "group_id": "123456",
+            "created_at": time.time(),
+            "timeout_seconds": 120,
+            "candidates": [],
+            "labels": [],
+            "language": "cn",
+            "query": "星也",
+            "ranked_identities": [
+                {
+                    "candidate_id": "1",
+                    "name": "星野",
+                    "local_score": 70,
+                    "variants": ["星野"],
+                    "forms": [{"Id": 1, "Name": "星野"}],
+                }
+            ],
+            "llm_enabled": True,
+        }
+        self.plugin._pending_student_queries[choice["token"]] = choice
+        event = SimpleNamespace(plain_result=lambda text: text)
+
+        results = [
+            result
+            async for result in self.plugin._finish_student_choice(
+                event, choice, "llm"
+            )
+        ]
+
+        self.assertIn("原候选菜单仍然有效", results[0])
+        self.assertIs(
+            self.plugin._pending_student_queries[choice["token"]], choice
+        )
 
     async def test_failed_candidate_reaction_does_not_shift_action_mapping(self):
         self.plugin.config["menu_settings"]["face_pool"] = ["14", "9"]

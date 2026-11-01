@@ -17,6 +17,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core.exceptions import ProviderNotFoundError
 from astrbot.core.message.message_event_result import MessageChain
 
 try:
@@ -31,7 +32,6 @@ from .api_clients.gamekee import GameKeeClient
 from .api_clients.schaledb_client import (
     SchaleDBClient,
     SchaleDBError,
-    StudentAmbiguousError,
 )
 from .poll_archive import PollArchive
 from .renderers.card import BirthdayCard, CardPoolCard, ScheduleCard
@@ -661,6 +661,35 @@ class BAToolbox(Star):
         settings = self.config.get("student_choice_settings", {})
         return settings if isinstance(settings, dict) else {}
 
+    def _student_search_settings(self) -> dict[str, Any]:
+        settings = self.config.get("student_search_settings", {})
+        return settings if isinstance(settings, dict) else {}
+
+    def _student_search_aliases(self) -> dict[str, str]:
+        configured = self._student_search_settings().get("custom_aliases", [])
+        if isinstance(configured, str):
+            configured = configured.splitlines()
+        if not isinstance(configured, (list, tuple)):
+            return {}
+
+        aliases = {}
+        for item in configured:
+            if not isinstance(item, str) or "=" not in item:
+                continue
+            alias, canonical = (part.strip() for part in item.split("=", 1))
+            if alias and canonical:
+                aliases[alias] = canonical
+        return aliases
+
+    def _student_llm_enabled(self) -> bool:
+        return self._student_search_settings().get("llm_enabled") is True
+
+    async def _search_student_candidates(
+        self, name: str, language: str
+    ) -> list[dict[str, Any]]:
+        self.schaledb.student_aliases = self._student_search_aliases()
+        return await self.schaledb.search_student_candidates(name, language)
+
     def _student_choice_timeout(self) -> int:
         try:
             timeout = int(
@@ -723,10 +752,19 @@ class BAToolbox(Star):
         normalized = text.strip().casefold()
         if normalized in {"取消", "取消查询", "cancel"}:
             return "cancel"
+        if choice.get("llm_enabled") and normalized in {
+            "llm",
+            "大模型辅助匹配",
+            "模型辅助匹配",
+        }:
+            return "llm"
         candidates = choice["candidates"]
         if normalized.isdigit():
             index = int(normalized)
-            if index == len(candidates) + 1:
+            if choice.get("llm_enabled") and index == len(candidates) + 1:
+                return "llm"
+            cancel_index = len(candidates) + 1 + int(bool(choice.get("llm_enabled")))
+            if index == cancel_index:
                 return "cancel"
             if 1 <= index <= len(candidates):
                 return index - 1
@@ -748,6 +786,12 @@ class BAToolbox(Star):
             self._close_student_choice(token)
             yield event.plain_result("已取消学生查询。")
             return
+        if action == "llm":
+            if not choice.get("llm_enabled"):
+                return
+            async for result in self._finish_student_choice_with_llm(event, choice):
+                yield result
+            return
         if not isinstance(action, int) or not 0 <= action < len(choice["candidates"]):
             return
         student = choice["candidates"][action]
@@ -759,6 +803,152 @@ class BAToolbox(Star):
             results = self._render_student_detail(event, student, choice["language"])
         async for result in results:
             yield result
+
+    async def _finish_student_choice_with_llm(
+        self, event: AstrMessageEvent, choice: dict[str, Any]
+    ):
+        identities = choice.get("ranked_identities", [])
+        if not identities:
+            yield event.plain_result(
+                "当前查询没有足够的本地角色候选可供大模型辅助，原候选菜单仍然有效。"
+            )
+            return
+
+        settings = self._student_search_settings()
+        provider_id = str(settings.get("llm_provider_id") or "").strip()
+        if not provider_id:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if not umo:
+                yield event.plain_result(
+                    "无法获取当前会话使用的大模型，请在“学生模糊匹配”中填写模型 Provider ID；"
+                    "原候选菜单仍然有效。"
+                )
+                return
+            try:
+                provider_id = await self.context.get_current_chat_provider_id(umo)
+            except ProviderNotFoundError as exc:
+                self._log_warn("student", "LLM provider unavailable", error=exc)
+                yield event.plain_result(
+                    "当前会话没有可用的大模型，请在“学生模糊匹配”中填写模型 Provider ID；"
+                    "原候选菜单仍然有效。"
+                )
+                return
+
+        timeout = settings.get("llm_timeout_seconds", 15)
+        try:
+            timeout = max(3, min(int(timeout), 120))
+        except (TypeError, ValueError):
+            timeout = 15
+
+        prompt_candidates = [
+            {
+                "candidate_id": identity["candidate_id"],
+                "name": identity["name"],
+                "variants": identity["variants"],
+                "local_score": identity["local_score"],
+            }
+            for identity in identities
+        ]
+        system_prompt = (
+            "你是碧蓝档案学生名称匹配助手。只能在用户提供的候选名单中排序，"
+            "不要创建、改写或补充候选，也不要调用外部知识来猜测。"
+            "结合用户输入与候选名称、形态名，按最可能匹配度从高到低排序。"
+            "只返回 JSON，不要 Markdown 或解释，格式为："
+            '{"ranking":[{"candidate_id":"原候选ID","name":"原候选名称",'
+            '"score":0}]}。score 是 0 到 100 的整数，表示相对匹配程度，不是事实保证。'
+        )
+        prompt = json.dumps(
+            {"query": choice["query"], "candidates": prompt_candidates},
+            ensure_ascii=False,
+        )
+        try:
+            response = await asyncio.wait_for(
+                self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                ),
+                timeout=timeout,
+            )
+        except (asyncio.TimeoutError, ProviderNotFoundError) as exc:
+            self._log_warn("student", "LLM-assisted matching unavailable", error=exc)
+            yield event.plain_result(
+                "大模型辅助匹配超时或不可用，原候选菜单仍然有效；"
+                "请直接选择菜单中的形态。"
+            )
+            return
+
+        response_text = str(getattr(response, "completion_text", "") or "").strip()
+        if response_text.startswith("```"):
+            response_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", response_text)
+        try:
+            payload = json.loads(response_text)
+            ranking = payload["ranking"]
+            if not isinstance(ranking, list):
+                raise ValueError("ranking must be a list")
+            by_id = {item["candidate_id"]: item for item in identities}
+            reordered = []
+            seen = set()
+            for item in ranking:
+                if not isinstance(item, dict):
+                    raise ValueError("ranking items must be objects")
+                candidate_id = str(item.get("candidate_id", ""))
+                candidate = by_id.get(candidate_id)
+                score = item.get("score")
+                if (
+                    candidate is None
+                    or item.get("name") != candidate["name"]
+                    or isinstance(score, bool)
+                    or not isinstance(score, (int, float))
+                    or not 0 <= score <= 100
+                    or candidate_id in seen
+                ):
+                    raise ValueError("invalid candidate ranking")
+                seen.add(candidate_id)
+                reordered.append((candidate, int(score)))
+            if seen != by_id.keys():
+                raise ValueError("ranking must include every supplied candidate")
+            reordered.sort(key=lambda result: result[1], reverse=True)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            self._log_warn("student", "LLM returned an invalid ranking", error=exc)
+            yield event.plain_result(
+                "大模型返回的候选结果无法校验，原候选菜单仍然有效；"
+                "请直接选择菜单中的形态。"
+            )
+            return
+
+        selected, confidence = reordered[0]
+        alternatives = [
+            candidate["name"]
+            for candidate, _ in reordered[1:]
+            if candidate["name"] != selected["name"]
+        ][:4]
+        notice = (
+            f"大模型认为最可能是「{selected['name']}」（参考匹配度 {confidence}%）。"
+        )
+        if alternatives:
+            notice += (
+                "另外几个相似角色是："
+                + "、".join(alternatives)
+                + "；如果不对，可以继续用这些名称查询。"
+            )
+        yield event.plain_result(notice)
+
+        sent, menu_prompt = await self._start_student_choice(
+            event,
+            choice["query"],
+            selected["forms"],
+            choice["language"],
+            query_mode=choice.get("query_mode", "detail"),
+            primary_name=selected["name"],
+            recommendations=alternatives,
+            replacing_token=choice["token"],
+            llm_enabled=False,
+        )
+        if sent:
+            self._close_student_choice(choice["token"])
+        else:
+            yield event.plain_result(menu_prompt)
 
     @staticmethod
     def _student_candidate_labels(
@@ -783,6 +973,11 @@ class BAToolbox(Star):
         candidates: list[dict[str, Any]],
         language: str,
         query_mode: str = "detail",
+        suggestions: bool = False,
+        primary_name: str = "",
+        recommendations: list[str] | None = None,
+        replacing_token: str | None = None,
+        llm_enabled: bool | None = None,
     ) -> tuple[bool, str]:
         user_id = str(event.get_sender_id() or "")
         if not user_id:
@@ -801,7 +996,7 @@ class BAToolbox(Star):
         self._cleanup_student_choices()
         max_active_menus = self._student_choice_max_active_menus()
         active_in_group = sum(
-            choice["group_id"] == group_id
+            choice["group_id"] == group_id and choice["token"] != replacing_token
             for choice in self._pending_student_queries.values()
         )
         if active_in_group >= max_active_menus:
@@ -825,20 +1020,43 @@ class BAToolbox(Star):
             "candidates": shown_candidates,
             "labels": labels,
             "language": language,
+            "ranked_identities": getattr(candidates, "ranked_identities", []),
+            "llm_enabled": (
+                self._student_llm_enabled()
+                if llm_enabled is None
+                else llm_enabled
+            ),
             "message_id": "",
             "emoji_map": {},
         }
         self._pending_student_queries[token] = choice
         self._student_choices_by_token[choice["token"]] = choice
 
-        lines = [f"「{query}」匹配到多个学生，请选择："]
+        if suggestions:
+            lines = [
+                f"「{query}」未能确定具体学生，最接近「{primary_name}」，"
+                "请从该学生的形态中选择："
+            ]
+        else:
+            lines = [
+                f"「{query}」最接近「{primary_name}」，以下是该学生的形态，请选择："
+            ]
         source_names = {"cn": "国服", "en": "国际服", "jp": "日服"}
         for index, (student, label) in enumerate(
             zip(shown_candidates, labels), start=1
         ):
             source = source_names.get(student.get("_data_source_language"), "其他")
             lines.append(f"{index}. {label}（{source}数据）")
-        cancel_index = len(shown_candidates) + 1
+        if recommendations:
+            lines.append(
+                "其他相似角色（如不是你要找的角色，可重新查询）："
+                + "、".join(recommendations)
+            )
+        if choice["llm_enabled"]:
+            lines.append(
+                f"{len(shown_candidates) + 1}. 🤖 大模型辅助匹配（可略微提升准确性）"
+            )
+        cancel_index = len(shown_candidates) + 1 + int(choice["llm_enabled"])
         lines.append(f"{cancel_index}. 取消查询")
         if len(candidates) > len(shown_candidates):
             lines.append(
@@ -882,7 +1100,10 @@ class BAToolbox(Star):
             face_id = str(face).strip()
             if face_id.isdigit() and face_id not in unique_faces:
                 unique_faces.append(face_id)
-        actions: list[int | str] = list(range(len(shown_candidates))) + ["cancel"]
+        actions: list[int | str] = list(range(len(shown_candidates)))
+        if choice["llm_enabled"]:
+            actions.append("llm")
+        actions.append("cancel")
         action_index = 0
         for face_id in unique_faces:
             if action_index >= len(actions):
@@ -1300,19 +1521,33 @@ class BAToolbox(Star):
         if language == "all":
             language = "cn"
         try:
-            student = await self.schaledb.search_student(name, language)
-        except StudentAmbiguousError as exc:
-            sent, prompt = await self._start_student_choice(
-                event, name, exc.candidates, language
-            )
-            if not sent:
-                yield event.plain_result(prompt)
-            return
+            candidates = await self._search_student_candidates(name, language)
         except SchaleDBError as exc:
             self._log_error("student", "SchaleDB lookup failed", error=exc)
             yield event.plain_result(f"学生数据查询失败：{exc}")
             return
 
+        if len(candidates) > 1 or getattr(candidates, "needs_confirmation", False):
+            sent, prompt = await self._start_student_choice(
+                event,
+                name,
+                candidates,
+                language,
+                suggestions=getattr(candidates, "needs_confirmation", False),
+                primary_name=getattr(candidates, "primary_name", ""),
+                recommendations=getattr(candidates, "recommendations", []),
+            )
+            if not sent:
+                yield event.plain_result(prompt)
+            return
+
+        recommendations = getattr(candidates, "recommendations", [])
+        if recommendations:
+            yield event.plain_result(
+                f"已匹配「{getattr(candidates, 'primary_name', '')}」；"
+                f"其他相似角色：{'、'.join(recommendations)}"
+            )
+        student = candidates[0]
         async for result in self._render_student_detail(event, student, language):
             yield result
 
@@ -1628,24 +1863,33 @@ class BAToolbox(Star):
         if language == "all":
             language = "cn"
         try:
-            candidates = await self.schaledb.search_student_candidates(name, language)
+            candidates = await self._search_student_candidates(name, language)
         except SchaleDBError as exc:
             self._log_error("guide", "student name lookup failed", error=exc)
             yield event.plain_result(f"攻略学生名称匹配失败：{exc}")
             return
 
-        if len(candidates) > 1:
+        if len(candidates) > 1 or getattr(candidates, "needs_confirmation", False):
             sent, prompt = await self._start_student_choice(
                 event,
                 name,
                 candidates,
                 language,
                 query_mode="guide",
+                suggestions=getattr(candidates, "needs_confirmation", False),
+                primary_name=getattr(candidates, "primary_name", ""),
+                recommendations=getattr(candidates, "recommendations", []),
             )
             if not sent:
                 yield event.plain_result(prompt)
             return
 
+        recommendations = getattr(candidates, "recommendations", [])
+        if recommendations:
+            yield event.plain_result(
+                f"已匹配「{getattr(candidates, 'primary_name', '')}」；"
+                f"其他相似角色：{'、'.join(recommendations)}"
+            )
         student_name = str(
             candidates[0].get("Name") or candidates[0].get("PathName") or name
         )
