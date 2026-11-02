@@ -3,7 +3,8 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-v4.29.3%2B-brightgreen)
 ![License](https://img.shields.io/badge/License-GPL--3.0-orange)
-![views](https://count.getloli.com/get/@astrbot_plugin_bluearchive_toolbox?theme=booru-jaypee)
+
+![views](https://count.getloli.com/get/@ba_toolbox&theme=minecraft)
 
 ## ✅ 简介 | Introduction
 
