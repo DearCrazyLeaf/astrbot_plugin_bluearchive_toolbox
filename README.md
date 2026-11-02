@@ -35,7 +35,7 @@
 
 - **学生详情卡片**：查询学生资料、技能、属性、装备、适应性和立绘
 - **活动日程与卡池千里眼**：查询国服、国际服、日服或全服排期，支持卡片和文本回复
-- **生日列表与学生攻略**：展示全服学生生日，或查询 Arona 上的学生攻略图片
+- **生日月历与学生攻略**：按月查看学生生日和头像，或查询 Arona 上的学生攻略图片
 - **每日轮询与推送**：定时生成日程、生日和千里眼卡片，推送到 `umo_groups` 配置的群聊，并按日期归档卡片和各群发送结果，方便在 Dashboard 查看；没有配置群聊时只保存归档
 - **表情回应菜单**：群聊中发送菜单关键词，通过表情或回复序号/菜单项执行预先配置的固定指令
 - **AstrBot 原生 WebUI**：查看功能、缓存统计、轮询记录和数据来源，并管理插件设置
@@ -45,15 +45,13 @@
 
 <img width="600" alt="暗色主题" src="docs/images/darktheme.png" />
 
-<img width="600" alt="日富美详情1" src="docs/images/hifumi_1.png" />
+<img width="600" alt="学生详情" src="docs/images/mika.png" />
 
-<img width="600" alt="日富美详情2" src="docs/images/hifumi_2.png" />
+<img width="600" alt="学生生日" src="docs/images/birthday_card.png" />
 
-<img width="600" alt="学生生日" src="docs/images/birthday.png" />
+<img width="600" alt="日程表" src="docs/images/schedule_card.png" />
 
-<img width="600" alt="日程表" src="docs/images/schedule.png" />
-
-<img width="600" alt="千里眼" src="docs/images/pool.png" />
+<img width="600" alt="千里眼" src="docs/images/pool_card.png" />
 
 ## 🧭 插件可以干什么？ | Functions & Workflow
 
@@ -200,7 +198,8 @@ AstrBot WebUI -> 插件 -> BA 工具箱 -> 插件配置
 | 学生攻略 | `攻略 日富美`、`攻略 日富美（赛车）` |
 | 活动日程 | `活动`、`活动 jp`、`活动 all` |
 | 卡池千里眼 | `卡池`、`卡池 global`、`卡池 all` |
-| 全服生日 | `生日` |
+| 学生生日月历 | `生日`（当月）、`生日 1月`（指定月份） |
+| 查询单个学生生日 | `生日 星野` |
 
 - 学生详情与攻略支持输入部分学生名称进行模糊匹配，版本名可以放在前面或后面，例如`泳装星野`、`星野（泳装）`；不带名称时会提示用法和输入示例
 
@@ -223,7 +222,7 @@ AstrBot WebUI -> 插件 -> BA 工具箱 -> 插件配置
 
 - 参数 `all` 会分别查询三个服务器并标注来源
 
-- 生日数据为全服通用，不接受区域参数
+- 生日数据为全服通用，不接受区域参数；`生日` 默认展示当月月历，`生日 <月份>` 展示指定月份，`生日 <学生名>` 返回该学生的文字生日信息
 
 ---
 

@@ -1,5 +1,6 @@
 import sys
 import asyncio
+from datetime import datetime
 from pathlib import Path
 
 import aiohttp
@@ -7,7 +8,12 @@ import aiohttp
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from api_clients.arona_client import AronaClient
-from renderers.card import BirthdayCard, CardPoolCard, ScheduleCard
+from renderers.card import (
+    BirthdayCard,
+    CardPoolCard,
+    ScheduleCard,
+    parse_birthday_date,
+)
 from renderers.student_detail import StudentDetailCard
 from renderers.html_renderer import BA_ASSETS
 from api_clients.schaledb_client import SchaleDBClient, SchaleDBError
@@ -112,19 +118,24 @@ async def main_async():
         )
     )
     pool_student_icons = await schaledb.get_student_icon_map(pool_student_names, "cn")
-    birthday_students = [
-        (name, birthday) for name, birthday, _ in birthday_records
+    now = datetime.now()
+    birthday_records = [
+        record
+        for record in birthday_records
+        if (birthday_date := parse_birthday_date(record[1]))
+        and birthday_date[0] == now.month
     ]
+    birthday_students = [(name, birthday) for name, birthday, _ in birthday_records]
     birthday_icons_by_id = await schaledb.get_student_icons_by_id(
         [
             student_id
-            for _, _, student_id in birthday_records[:24]
+            for _, _, student_id in birthday_records
             if student_id is not None
         ]
     )
     birthday_student_icons = {
         name: birthday_icons_by_id[str(student_id)]
-        for name, _, student_id in birthday_records[:24]
+        for name, _, student_id in birthday_records
         if student_id is not None and str(student_id) in birthday_icons_by_id
     }
     await schaledb.close()
@@ -164,8 +175,10 @@ async def main_async():
 
     # 2. 生日卡片
     card = BirthdayCard(
-        students=birthday_students[:24],
+        students=birthday_students,
         student_icons=birthday_student_icons,
+        month=now.month,
+        year=now.year,
     )
     png = await render_in_thread(card)
     print(f"[BirthdayCard] {save_png('birthday_card.png', png)} ({len(png)} bytes)")

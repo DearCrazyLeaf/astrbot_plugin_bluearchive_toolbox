@@ -390,23 +390,49 @@ class SchaleDBClient:
 
     @classmethod
     def _student_search_group_key(
-        cls, student: dict[str, Any], path_names: set[str] | None = None
+        cls,
+        student: dict[str, Any],
+        path_names: set[str] | None = None,
+        personal_names_by_path: dict[str, set[str]] | None = None,
+        student_personal_names: set[str] | None = None,
     ) -> str:
-        family = student.get("FamilyName")
-        personal = student.get("PersonalName")
-        if isinstance(family, str) and family and isinstance(personal, str) and personal:
-            return f"person:{cls._normalize_name(family + personal)}"
-
         path_name = str(student.get("PathName") or "").lower()
         path_parts = path_name.split("_")
         known_paths = path_names or set()
+        names_by_path = personal_names_by_path or {}
+        personal_names = student_personal_names or set()
+
+        def shares_personal_name(path: str) -> bool:
+            root_names = names_by_path.get(path, set())
+            return (
+                not personal_names
+                or not root_names
+                or bool(personal_names.intersection(root_names))
+            )
+
         matching_roots = [
             "_".join(path_parts[:index])
             for index in range(1, len(path_parts))
             if "_".join(path_parts[:index]) in known_paths
+            and shares_personal_name("_".join(path_parts[:index]))
         ]
         if matching_roots:
             return f"path:{max(matching_roots, key=len)}"
+        if path_name in known_paths and any(
+            candidate.startswith(f"{path_name}_")
+            for candidate in known_paths
+            if candidate != path_name
+        ) and any(
+            shares_personal_name(candidate)
+            for candidate in known_paths
+            if candidate.startswith(f"{path_name}_")
+        ):
+            return f"path:{path_name}"
+
+        family = student.get("FamilyName")
+        personal = student.get("PersonalName")
+        if isinstance(family, str) and family and isinstance(personal, str) and personal:
+            return f"person:{cls._normalize_name(family + personal)}"
 
         suffixes = sorted(
             (*cls.VARIANT_LABELS, "tactical", "new_year", "hotspring"),
@@ -615,6 +641,27 @@ class SchaleDBClient:
             for student in preferred_records.values()
             if student.get("PathName")
         }
+        personal_names_by_path: dict[str, set[str]] = {}
+        personal_names_by_id: dict[int, set[str]] = {}
+        for student_id in preferred_records:
+            records = [
+                localized[student_id]
+                for localized in students_by_id.values()
+                if student_id in localized
+            ]
+            path_name = str(
+                preferred_records[student_id].get("PathName") or ""
+            ).lower()
+            personal_names = {
+                self._normalize_name(str(record.get("PersonalName") or ""))
+                for record in records
+                if record.get("PersonalName")
+            }
+            personal_names_by_id[student_id] = personal_names
+            if path_name:
+                personal_names_by_path.setdefault(path_name, set()).update(
+                    personal_names
+                )
         group_student_ids: dict[str, set[int]] = {}
         identity_records: dict[str, list[dict[str, Any]]] = {}
         records_by_id: dict[int, list[dict[str, Any]]] = {}
@@ -627,7 +674,12 @@ class SchaleDBClient:
                 for localized in students_by_id.values()
                 if student_id in localized
             ]
-            group_key = self._student_search_group_key(preferred, path_names)
+            group_key = self._student_search_group_key(
+                preferred,
+                path_names,
+                personal_names_by_path,
+                personal_names_by_id.get(student_id, set()),
+            )
             group_by_id[student_id] = group_key
             group_student_ids.setdefault(group_key, set()).add(student_id)
             identity_records.setdefault(group_key, []).extend(records)

@@ -34,7 +34,12 @@ from .api_clients.schaledb_client import (
     SchaleDBError,
 )
 from .poll_archive import PollArchive
-from .renderers.card import BirthdayCard, CardPoolCard, ScheduleCard
+from .renderers.card import (
+    BirthdayCard,
+    CardPoolCard,
+    ScheduleCard,
+    parse_birthday_date,
+)
 from .renderers.card_fonts import prepare_card_fonts
 from .renderers.html_renderer import configure_font_cache_dir, is_chromium_installed
 from .renderers.student_detail import render_student_detail
@@ -469,18 +474,18 @@ class BAToolbox(Star):
         if category == "birthday":
             language = str(self._get_setting("student_data_language") or "cn")
             records = await self.schaledb.get_birthdays_with_ids(language)
-            birthdays = [(name, birthday) for name, birthday, _ in records]
-            today = (datetime.now().month, datetime.now().day)
-
-            def upcoming_key(record: tuple[str, str]) -> tuple[int, int, int, str]:
-                match = re.search(r"(\d{1,2})\s*(?:/|月|-)\s*(\d{1,2})", record[1])
-                if not match:
-                    return 2, 13, 32, record[0]
-                month, day = int(match.group(1)), int(match.group(2))
-                return (0 if (month, day) >= today else 1, month, day, record[0])
-
-            students = sorted(birthdays, key=upcoming_key)[:24]
-            student_ids = {name: student_id for name, _, student_id in records}
+            now = datetime.now()
+            current_month = now.month
+            current_year = now.year
+            students = [
+                (name, birthday)
+                for name, birthday, _ in records
+                if (birthday_date := parse_birthday_date(birthday))
+                and birthday_date[0] == current_month
+            ]
+            student_ids = {
+                name: student_id for name, _, student_id in records
+            }
             icons_by_id = await self.schaledb.get_student_icons_by_id(
                 [
                     student_id
@@ -494,8 +499,13 @@ class BAToolbox(Star):
                 if (student_id := student_ids.get(name)) is not None
                 and str(student_id) in icons_by_id
             }
-            card = BirthdayCard(students=students, student_icons=student_icons)
-            return await self._render_in_thread(card.render), len(birthdays)
+            card = BirthdayCard(
+                students=students,
+                student_icons=student_icons,
+                month=current_month,
+                year=current_year,
+            )
+            return await self._render_in_thread(card.render), len(students)
 
         raise ValueError(f"Unknown polling category: {category}")
 
@@ -1748,11 +1758,12 @@ class BAToolbox(Star):
 
     async def _handle_birthday(self, event: AstrMessageEvent, args: str):
         """查询学生生日。"""
-        if args.strip():
-            yield event.plain_result(
-                "学生生日数据为全服通用，无需指定服务器区域。用法：生日"
-            )
+        query = args.strip()
+        month_match = re.fullmatch(r"(\d{1,2})\s*月?", query)
+        if month_match and not 1 <= int(month_match.group(1)) <= 12:
+            yield event.plain_result("月份无效，请输入 1月 到 12月。")
             return
+        requested_month = int(month_match.group(1)) if month_match else None
 
         language = str(self._get_setting("student_data_language") or "cn")
         try:
@@ -1772,21 +1783,45 @@ class BAToolbox(Star):
             yield event.plain_result("暂无生日数据。")
             return
 
-        birthday_students = [(name, birthday) for name, birthday, _ in birthday_records]
-        today = (datetime.now().month, datetime.now().day)
+        if query and requested_month is None:
+            normalized_query = re.sub(r"\s+", "", query).casefold()
+            exact_matches = [
+                (name, birthday)
+                for name, birthday, _ in birthday_records
+                if re.sub(r"\s+", "", name).casefold() == normalized_query
+            ]
+            matches = exact_matches or [
+                (name, birthday)
+                for name, birthday, _ in birthday_records
+                if normalized_query in re.sub(r"\s+", "", name).casefold()
+            ]
+            if not matches:
+                yield event.plain_result(f"没有找到「{query}」的生日记录。")
+            elif len(matches) == 1:
+                name, birthday = matches[0]
+                yield event.plain_result(f"{name}的生日是 {birthday}。")
+            else:
+                lines = [f"找到多个匹配「{query}」的学生生日："]
+                lines.extend(f"• {name}：{birthday}" for name, birthday in matches)
+                yield event.plain_result("\n".join(lines))
+            return
 
-        def upcoming_key(record: tuple[str, str]) -> tuple[int, int, int, str]:
-            match = re.search(r"(\d{1,2})\s*(?:/|月|-)\s*(\d{1,2})", record[1])
-            if not match:
-                return 2, 13, 32, record[0]
-            month, day = int(match.group(1)), int(match.group(2))
-            return (0 if (month, day) >= today else 1, month, day, record[0])
-
-        students = sorted(birthday_students, key=upcoming_key)[:24]
-        records_by_name = {name: student_id for name, _, student_id in birthday_records}
+        now = datetime.now()
+        month = requested_month or now.month
+        year = now.year
+        students_with_ids = [
+            (name, birthday, student_id)
+            for name, birthday, student_id in birthday_records
+            if (birthday_date := parse_birthday_date(birthday))
+            and birthday_date[0] == month
+        ]
+        students = [(name, birthday) for name, birthday, _ in students_with_ids]
+        records_by_name = {
+            name: student_id for name, _, student_id in students_with_ids
+        }
         mode = str(self._get_setting("message_mode", "card"))
         if mode == "text":
-            lines = [f"学生生日列表（共 {len(birthday_students)} 位）："]
+            lines = [f"{month}月学生生日（共 {len(students)} 位）："]
             lines.extend(f"• {name}：{birthday}" for name, birthday in students)
             yield event.plain_result("\n".join(lines))
             return
@@ -1827,11 +1862,13 @@ class BAToolbox(Star):
             card = BirthdayCard(
                 students=students,
                 student_icons=student_icons,
+                month=month,
+                year=year,
             )
             card_bytes = await self._render_in_thread(card.render)
             yield event.image_result(str(self._store_card(card_bytes)))
             if mode == "mixed":
-                lines = [f"学生生日列表（共 {len(birthday_students)} 位）："]
+                lines = [f"{month}月学生生日（共 {len(students)} 位）："]
                 lines.extend(f"• {name}：{birthday}" for name, birthday in students)
                 yield event.plain_result("\n".join(lines))
         except Exception as exc:

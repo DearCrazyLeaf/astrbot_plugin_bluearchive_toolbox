@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -13,7 +14,12 @@ from api_clients.schaledb_client import (
 )
 from api_clients.cache_manager import ImageCacheManager
 from api_clients.gamekee import GameKeeClient
-from renderers.card import BirthdayCard, CardPoolCard, ScheduleCard
+from renderers.card import (
+    BirthdayCard,
+    CardPoolCard,
+    ScheduleCard,
+    parse_birthday_date,
+)
 from renderers.student_detail import StudentDetailCard, _format_description
 
 
@@ -386,6 +392,90 @@ class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["Id"], 10153)
         self.assertEqual(result["Name"], "日富美（赛车）")
         self.assertEqual(result["BulletType"], "Explosion")
+
+    async def test_plain_name_groups_cross_language_forms_and_keeps_base_form_first(self):
+        cn_students = [
+            {
+                "Id": 10003,
+                "Name": "日富美",
+                "PathName": "hifumi",
+                "FamilyName": "阿慈谷",
+                "PersonalName": "日富美",
+            },
+            {
+                "Id": 20005,
+                "Name": "日富美（泳装）",
+                "PathName": "hifumi_swimsuit",
+                "FamilyName": "阿慈谷",
+                "PersonalName": "日富美",
+            },
+            {
+                "Id": 10153,
+                "Name": "ヒフミ（レーシング）",
+                "PathName": "hifumi_racing",
+                "FamilyName": "阿慈谷",
+                "PersonalName": "ヒフミ",
+            },
+        ]
+        en_students = [
+            {
+                "Id": 10003,
+                "Name": "Hifumi",
+                "PathName": "hifumi",
+                "FamilyName": "Ajitani",
+                "PersonalName": "Hifumi",
+            },
+            {
+                "Id": 20005,
+                "Name": "Hifumi (Swimsuit)",
+                "PathName": "hifumi_swimsuit",
+                "FamilyName": "Ajitani",
+                "PersonalName": "Hifumi",
+            },
+            {
+                "Id": 10153,
+                "Name": "Hifumi (Racing)",
+                "PathName": "hifumi_racing",
+                "FamilyName": "Ajitani",
+                "PersonalName": "Hifumi",
+            },
+        ]
+        jp_students = [
+            {
+                "Id": 10003,
+                "Name": "ヒフミ",
+                "PathName": "hifumi",
+                "FamilyName": "阿慈谷",
+                "PersonalName": "ヒフミ",
+            },
+            {
+                "Id": 20005,
+                "Name": "ヒフミ（水着）",
+                "PathName": "hifumi_swimsuit",
+                "FamilyName": "阿慈谷",
+                "PersonalName": "ヒフミ",
+            },
+            {
+                "Id": 10153,
+                "Name": "ヒフミ（レーシング）",
+                "PathName": "hifumi_racing",
+                "FamilyName": "阿慈谷",
+                "PersonalName": "ヒフミ（レーシング）",
+            },
+        ]
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(
+                side_effect=[cn_students, en_students, jp_students]
+            )
+            candidates = await client.search_student_candidates("日富美", "cn")
+
+        self.assertEqual(
+            {candidate["Id"] for candidate in candidates},
+            {10003, 20005, 10153},
+        )
+        self.assertEqual(candidates[0]["Id"], 10003)
+        self.assertFalse(candidates.needs_confirmation)
 
     async def test_search_matches_variant_name_when_variant_prefix_is_reordered(self):
         cn_students = [
@@ -1089,6 +1179,20 @@ class StudentDetailCardTests(unittest.TestCase):
         self.assertIn("fonts/Blueaka.ttf", rendered_html)
         self.assertIn("font-family: 'ResourceHanRounded'", rendered_html)
 
+    def test_student_detail_subtitle_is_italic_single_line_with_english_emphasis(self):
+        rendered_html = StudentDetailCard(
+            {
+                "Name": "学生",
+                "School": "Abydos",
+                "Club": "Food Club",
+                "SquadType": "Main",
+                "Birthday": "01/01",
+            }
+        )._build_html()
+
+        self.assertIn("font-style: italic; white-space: nowrap", rendered_html)
+        self.assertIn("<strong>Food Club</strong>", rendered_html)
+
     def test_description_parameters_are_expanded_and_html_is_escaped(self):
         description = _format_description(
             "Damage <b:CriticalDamage> <?1> <img src=x>",
@@ -1244,7 +1348,7 @@ class StudentDetailCardTests(unittest.TestCase):
         ]
         schedule = ScheduleCard(events=events, region="jp")
         pool = CardPoolCard(pools=events[:2], region="jp")
-        birthday = BirthdayCard(students=[("Student <unsafe>", "1/2")])
+        birthday = BirthdayCard(students=[("Student <unsafe>", "1/2")], month=1)
 
         self.assertGreater(schedule.CARD_H, 220)
         self.assertIn("&lt;unsafe&gt;", schedule._build_html())
@@ -1274,13 +1378,73 @@ class StudentDetailCardTests(unittest.TestCase):
                         f'<span class="region">{expected_label}</span>',
                         rendered_html,
                     )
-                    self.assertIn("<small>日服</small>", rendered_html)
+                    if region == "all":
+                        self.assertIn(
+                            '<h2 class="server-heading">日服</h2>',
+                            rendered_html,
+                        )
 
         all_events = [{"title": f"活动{i}", "pub_area": "日服"} for i in range(12)]
         all_card = ScheduleCard(events=all_events, region="all")
         self.assertEqual(
             all_card._build_html().count('<article class="schedule-row">'), 12
         )
+
+    def test_schedule_card_groups_servers_and_sorts_events_as_calendar(self):
+        card = ScheduleCard(
+            events=[
+                {
+                    "title": "较晚活动",
+                    "pub_area": "国际服",
+                    "start_at": 1762041600,
+                    "end_at": 1762128000,
+                },
+                {
+                    "title": "日服活动",
+                    "pub_area": "日服",
+                    "start_at": 1761955200,
+                    "end_at": 1762041600,
+                },
+                {
+                    "title": "较早活动",
+                    "pub_area": "国际服",
+                    "start_at": 1761955200,
+                    "end_at": 1762041600,
+                },
+            ],
+            region="all",
+        )
+        rendered_html = card._build_html()
+
+        self.assertIn('<h2 class="server-heading">国际服</h2>', rendered_html)
+        self.assertIn('<h2 class="server-heading">日服</h2>', rendered_html)
+        self.assertEqual(rendered_html.count('class="event-check"'), 3)
+        self.assertEqual(
+            rendered_html.count(
+                'src="ba-asset://img/ui/Common_Icon_Check_Y_On.png"'
+            ),
+            3,
+        )
+        self.assertLess(rendered_html.index("较早活动"), rendered_html.index("较晚活动"))
+        self.assertLess(
+            rendered_html.index('<h2 class="server-heading">国际服</h2>'),
+            rendered_html.index('<h2 class="server-heading">日服</h2>'),
+        )
+        self.assertIn("11月01日", rendered_html)
+        self.assertIn("11月03日", rendered_html)
+
+    def test_card_header_introductions_share_italic_single_line_style(self):
+        card_html = (
+            ScheduleCard()._build_html(),
+            CardPoolCard(pools=[])._build_html(),
+            BirthdayCard()._build_html(),
+        )
+
+        for rendered_html in card_html:
+            with self.subTest(card=rendered_html[:80]):
+                self.assertIn("font-style: italic; white-space: nowrap", rendered_html)
+                self.assertIn("font-weight: 700", rendered_html)
+                self.assertIn('class="header-caption"', rendered_html)
 
     def test_schedule_pool_and_birthday_cards_reference_bundled_font_url(self):
         for html in (
@@ -1296,7 +1460,7 @@ class StudentDetailCardTests(unittest.TestCase):
                 self.assertIn("'ResourceHanRounded'", html)
                 self.assertIn("'BA Compact'", html)
 
-    def test_schedule_pool_and_birthday_cards_reuse_dashboard_icons_and_canvas(self):
+    def test_cards_use_their_icons_and_shared_canvas(self):
         plugin_root = Path(__file__).resolve().parents[1]
         cards = (
             (ScheduleCard(), "collectible_icon_guidemission_s15_1.webp"),
@@ -1304,14 +1468,23 @@ class StudentDetailCardTests(unittest.TestCase):
             (BirthdayCard(), "item_icon_favor_26.webp"),
         )
 
-        for card, icon_name in cards:
+        for card, asset_name in cards:
             with self.subTest(card=type(card).__name__):
+                rendered_html = card._build_html()
                 icon_path = (
-                    plugin_root / "views" / "ba-toolbox" / "assets" / "icons" / icon_name
+                    plugin_root
+                    / "views"
+                    / "ba-toolbox"
+                    / "assets"
+                    / "icons"
+                    / asset_name
                 )
                 icon_data = base64.b64encode(icon_path.read_bytes()).decode("ascii")
-                rendered_html = card._build_html()
                 self.assertIn(f"data:image/webp;base64,{icon_data}", rendered_html)
+                if type(card) is BirthdayCard:
+                    self.assertIn('class="birthday-logo"', rendered_html)
+                    self.assertIn("img/ui/birthday/logo.png", rendered_html)
+                    self.assertIn('class="header-mark"', rendered_html)
                 self.assertIn("border-radius: 20px", rendered_html)
                 self.assertIn("Noto Sans CJK SC", rendered_html)
                 self.assertIn("center/cover no-repeat; transform: scale(1.35)", rendered_html)
@@ -1341,6 +1514,7 @@ class StudentDetailCardTests(unittest.TestCase):
             birthday = BirthdayCard(
                 students=[("日富美", "11/27")],
                 student_icons=icons,
+                month=11,
             )
 
             pool_html = pool._build_html()
@@ -1351,13 +1525,78 @@ class StudentDetailCardTests(unittest.TestCase):
 
     def test_birthday_card_height_fits_all_24_students_and_row_gaps(self):
         birthday = BirthdayCard(
-            students=[(f"Student {index}", f"1/{index}") for index in range(24)]
+            students=[(f"Student {index}", f"1/{index}") for index in range(1, 25)],
+            month=1,
         )
 
-        self.assertEqual(birthday.CARD_H, 574)
-        self.assertIn("min-height: 574px", birthday._build_html())
+        self.assertGreater(birthday.CARD_H, 400)
+        self.assertIn(f"min-height: {birthday.CARD_H}px", birthday._build_html())
+        self.assertIn('class="calendar-weekdays"', birthday._build_html())
+        self.assertEqual(len(birthday.students), 24)
 
-    def test_pool_card_keeps_long_student_lists_in_wrapped_member_grid(self):
+    def test_birthday_card_groups_current_month_students_by_calendar_day(self):
+        card = BirthdayCard(
+            students=[
+                ("学生一", "1/2"),
+                ("学生二", "1月2日"),
+                ("学生三", "2/2"),
+            ],
+            month=1,
+            year=2026,
+        )
+        rendered_html = card._build_html()
+
+        self.assertEqual(card.students, [("学生一", "1/2"), ("学生二", "1月2日")])
+        self.assertEqual(rendered_html.count('class="birthday-entry"'), 2)
+        self.assertIn("可发送 “生日 月份” 查询对应月份日历", rendered_html)
+        self.assertIn("width: 205px; height: auto", rendered_html)
+        self.assertIn(".header-title-row { display: flex; align-items: flex-start;", rendered_html)
+        self.assertIn("height: auto; margin-top: -3px", rendered_html)
+        self.assertIn("margin-top: -6px; margin-left: 56px", rendered_html)
+        self.assertIn("gap: 7px; max-width: calc(100% - 56px)", rendered_html)
+        self.assertIn("font-size: 11px; font-style: italic; white-space: nowrap", rendered_html)
+        self.assertIn('class="birthday-logo"', rendered_html)
+        self.assertIn("img/ui/birthday/logo.png", rendered_html)
+        self.assertNotIn("calendar-wordmark", rendered_html)
+        self.assertIn('<div class="month-stamp"><strong>01</strong></div>', rendered_html)
+        self.assertNotIn("位生日学生", rendered_html)
+        self.assertIn('class="calendar-weekdays"', rendered_html)
+        self.assertIn('<small>Sun</small>', rendered_html)
+        self.assertIn('<small>Sat</small>', rendered_html)
+        self.assertIn(".day-cell:not(.empty-day)::after", rendered_html)
+        self.assertIn("column-gap: 7px; margin-bottom: 8px", rendered_html)
+        self.assertIn('class="doodle-character"', rendered_html)
+        self.assertIn('class="doodle-mascot"', rendered_html)
+        self.assertIn('class="calendar-doodle-background"', rendered_html)
+        self.assertIn(
+            ".calendar-doodle-background { position: absolute; z-index: 0; top: 2px; "
+            "right: 14px; width: 138px; height: 58px; object-fit: contain; }",
+            rendered_html,
+        )
+        self.assertIn('class="doodle-party-left"', rendered_html)
+        self.assertIn('class="doodle-party-right"', rendered_html)
+        self.assertEqual(parse_birthday_date("11月27日"), (11, 27))
+        self.assertIsNone(parse_birthday_date("13/27"))
+
+    def test_birthday_calendar_marks_today_with_hand_drawn_red_circle(self):
+        card = BirthdayCard(
+            students=[("星野", "1/2")],
+            month=1,
+            year=2026,
+            today=datetime(2026, 1, 2),
+        )
+        rendered_html = card._build_html()
+
+        self.assertIn('class="day-cell has-birthday today"', rendered_html)
+        self.assertIn('class="day-number today-ring">2</span>', rendered_html)
+        self.assertIn(".today-ring::before", rendered_html)
+        self.assertIn(".today-ring::after", rendered_html)
+        self.assertIn("border: 2px solid #d6473f", rendered_html)
+        self.assertIn("border-width: 1px; opacity: .7; transform: rotate(8deg)", rendered_html)
+        self.assertIn("'ResourceHanRounded','BA Compact','Blueaka'", rendered_html)
+        self.assertIn(".birthday-entry * { font-family: inherit !important; }", rendered_html)
+
+    def test_pool_card_shows_chronological_calendar_timeline_without_numbering(self):
         names = [
             "星野（泳装）",
             "白子（泳装）",
@@ -1376,8 +1615,8 @@ class StudentDetailCardTests(unittest.TestCase):
                 {
                     "title": f"卡池：{'、'.join(names)}",
                     "students": names,
-                    "start_at": 1761955200,
-                    "end_at": 1762041600,
+                    "start_at": 1762041600,
+                    "end_at": 1762128000,
                     "pub_area": "国际服",
                 },
                 {
@@ -1385,19 +1624,123 @@ class StudentDetailCardTests(unittest.TestCase):
                     "students": ["美游", "时雨", "冬"],
                     "start_at": 1761955200,
                     "end_at": 1762041600,
-                    "pub_area": "日服",
+                    "pub_area": "国际服",
+                },
+                {
+                    "title": "卡池：日奈",
+                    "students": ["日奈"],
+                    "start_at": 1761955200,
+                    "end_at": 1762041600,
+                    "pub_area": "国服",
                 },
             ],
             region="all",
         )
         rendered_html = card._build_html()
 
-        self.assertEqual(card.CARD_H, 496)
-        self.assertIn("grid-template-columns: repeat(4,minmax(0,1fr))", rendered_html)
+        self.assertIn("grid-template-columns: repeat(3,minmax(0,1fr))", rendered_html)
+        self.assertIn('<h2 class="server-heading">国服</h2>', rendered_html)
+        self.assertIn('<h2 class="server-heading">国际服</h2>', rendered_html)
+        self.assertEqual(rendered_html.count('class="pool-row"'), 3)
+        self.assertNotIn("本期招募", rendered_html)
+        self.assertNotIn("pool-index", rendered_html)
+        self.assertLess(rendered_html.index("美游"), rendered_html.index("星野"))
         for name in names:
             self.assertIn(name, rendered_html)
-        self.assertEqual(rendered_html.count('class="pool-row"'), 2)
-        self.assertEqual(rendered_html.count("<time>"), 2)
+        self.assertEqual(rendered_html.count("<time>"), 3)
+        self.assertIn("11月01日", rendered_html)
+        self.assertIn("11月03日", rendered_html)
+        self.assertIn("招募档期", rendered_html)
+
+    def test_calendar_date_captions_appear_above_date_ranges(self):
+        schedule_html = ScheduleCard(
+            events=[{"title": "活动", "pub_area": "国服"}]
+        )._build_html()
+        pool_html = CardPoolCard(
+            pools=[{"title": "卡池", "pub_area": "国服"}]
+        )._build_html()
+
+        schedule_dates = schedule_html[
+            schedule_html.index('<div class="schedule-dates">'):
+            schedule_html.index("</div>", schedule_html.index('<div class="schedule-dates">'))
+        ]
+        pool_dates = pool_html[
+            pool_html.index('<div class="pool-dates">'):
+            pool_html.index("</div>", pool_html.index('<div class="pool-dates">'))
+        ]
+
+        self.assertLess(
+            schedule_dates.index("活动档期"),
+            schedule_dates.index("<time>"),
+        )
+        self.assertLess(pool_dates.index("招募档期"), pool_dates.index("<time>"))
+        self.assertNotIn("本期招募", pool_html)
+
+    def test_calendar_timeline_rows_share_one_server_card(self):
+        schedule_html = ScheduleCard(
+            events=[
+                {"title": "活动一", "pub_area": "国服"},
+                {"title": "活动二", "pub_area": "国服"},
+            ]
+        )._build_html()
+        pool_html = CardPoolCard(
+            pools=[
+                {"title": "卡池一", "pub_area": "国服"},
+                {"title": "卡池二", "pub_area": "国服"},
+            ]
+        )._build_html()
+
+        self.assertIn(
+            ".schedule-list { display: grid; overflow: hidden; border:",
+            schedule_html,
+        )
+        self.assertIn(
+            ".pool-list { display: grid; overflow: hidden; border:",
+            pool_html,
+        )
+        self.assertEqual(schedule_html.count('<div class="schedule-list">'), 1)
+        self.assertEqual(pool_html.count('<div class="pool-list">'), 1)
+        self.assertIn(".schedule-timeline::before", schedule_html)
+        self.assertIn(
+            ".schedule-timeline::before { position: absolute; top: -10px; bottom: -10px; left: 50%; width: 2px; background: #b7dce8;",
+            schedule_html,
+        )
+        self.assertIn(".schedule-row:first-child .schedule-timeline::before { top: 50%; }", schedule_html)
+        self.assertIn(".schedule-row:last-child .schedule-timeline::before { bottom: 50%; }", schedule_html)
+        self.assertIn(".pool-timeline::before", pool_html)
+        self.assertIn(
+            ".pool-timeline::before { position: absolute; top: -11px; bottom: -11px; left: 50%; width: 2px; background: #b7dce8;",
+            pool_html,
+        )
+        self.assertIn(".pool-row:first-child .pool-timeline::before { top: 50%; }", pool_html)
+        self.assertIn(".pool-row:last-child .pool-timeline::before { bottom: 50%; }", pool_html)
+        self.assertNotIn(".schedule-row + .schedule-row", schedule_html)
+        self.assertNotIn(".pool-row + .pool-row", pool_html)
+
+    def test_calendar_timeline_single_item_has_no_line_beyond_its_node(self):
+        schedule_html = ScheduleCard(
+            events=[{"title": "仅一个活动", "pub_area": "国服"}]
+        )._build_html()
+        pool_html = CardPoolCard(
+            pools=[{"title": "仅一个卡池", "pub_area": "国服"}]
+        )._build_html()
+
+        self.assertIn(
+            ".schedule-row:first-child .schedule-timeline::before { top: 50%; }",
+            schedule_html,
+        )
+        self.assertIn(
+            ".schedule-row:last-child .schedule-timeline::before { bottom: 50%; }",
+            schedule_html,
+        )
+        self.assertIn(
+            ".pool-row:first-child .pool-timeline::before { top: 50%; }",
+            pool_html,
+        )
+        self.assertIn(
+            ".pool-row:last-child .pool-timeline::before { bottom: 50%; }",
+            pool_html,
+        )
 
     def test_schedule_card_height_accounts_for_wrapped_event_titles(self):
         title = "维护结束后将开放新的活动任务与特别奖励，记得领取" * 2
@@ -1409,7 +1752,7 @@ class StudentDetailCardTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(card.CARD_H, 365)
+        self.assertGreaterEqual(card.CARD_H, 450)
         self.assertEqual(card._build_html().count(title), 3)
 
     def test_birthday_card_counts_long_names_when_estimating_wrapped_rows(self):
@@ -1417,7 +1760,7 @@ class StudentDetailCardTests(unittest.TestCase):
             (f"日富美活动特别推荐版本学生名称测试{index}", "11/27")
             for index in range(12)
         ]
-        birthday = BirthdayCard(students=students)
+        birthday = BirthdayCard(students=students, month=11)
 
         self.assertGreater(birthday.CARD_H, 220)
         self.assertIn("日富美活动特别推荐版本学生名称测试11", birthday._build_html())

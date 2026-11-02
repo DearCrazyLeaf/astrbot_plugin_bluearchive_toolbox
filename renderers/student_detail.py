@@ -141,6 +141,12 @@ def _text(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
+def _subtitle_emphasis(value: str) -> str:
+    if re.search(r"[A-Za-z]", value):
+        return f"<strong>{value}</strong>"
+    return value
+
+
 def _file_uri(path: str | Path | None) -> str:
     if not path:
         return ""
@@ -777,9 +783,10 @@ class StudentDetailCard:
         school_label = _text(self._localized("School", school, _SCHOOL_NAMES))
         school_inline = (
             f'<span class="school-inline">'
-            f'<img src="{school_uri}" alt="">{school_label}</span>'
+            f'<img src="{school_uri}" alt="">'
+            f'{_subtitle_emphasis(school_label)}</span>'
             if school_uri
-            else f"<span>{school_label}</span>"
+            else f"<span>{_subtitle_emphasis(school_label)}</span>"
         )
         birthday = student.get("Birthday") or student.get("BirthDay") or ""
 
@@ -795,8 +802,10 @@ body {{ background: #eaf5fa; }}
 .header {{ display: flex; align-items: flex-start; gap: 12px; }}
 .title-area {{ flex: 1; min-width: 0; }}
 h1 {{ margin: 0; font-size: 34px; line-height: 1.2; color: #28364b; overflow-wrap: anywhere; }}
-.subtitle {{ display: flex; gap: 10px; align-items: center; margin-top: 5px; color: #738195; font-size: 14px; }}
-.school-inline {{ display: inline-flex; align-items: center; gap: 5px; }}
+.subtitle {{ display: flex; flex-wrap: nowrap; gap: 10px; align-items: center; margin-top: 5px; overflow: hidden; color: #738195; font-size: 14px; font-style: italic; white-space: nowrap; }}
+.subtitle > span {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.subtitle strong {{ font-weight: 800; }}
+.school-inline {{ display: inline-flex; min-width: 0; align-items: center; gap: 5px; }}
 .school-inline img {{ width: 22px; height: 22px; padding: 3px; border-radius: 5px; background: #303037; object-fit: contain; }}
 .stars {{ display: flex; gap: 3px; margin-top: 9px; }}
 .star {{ width: 23px; height: 23px; }}
@@ -889,7 +898,7 @@ h2 small {{ margin-left: 8px; font-size: 12px; font-weight: 400; color: #8190a1;
 </style></head>
 <body><main class="card"><div class="card-bg"></div><div class="content">
 <header class="header"><div class="title-area"><h1>{_text(name)}</h1>
-<div class="subtitle">{school_inline}{f"<span>· {club}</span>" if club else ""}{f"<span>· {_text(squad)}</span>" if squad else ""}{f"<span>· {_text(birthday)}</span>" if birthday else ""}</div>
+<div class="subtitle">{school_inline}{f"<span>· {_subtitle_emphasis(club)}</span>" if club else ""}{f"<span>· {_subtitle_emphasis(_text(squad))}</span>" if squad else ""}{f"<span>· {_subtitle_emphasis(_text(birthday))}</span>" if birthday else ""}</div>
 <div class="stars">{self._stars()}</div></div>{header_school}</header>
 <div class="tags">{tags}</div>
 {self._equipment()}

@@ -272,6 +272,72 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(results, [])
 
+    async def test_birthday_student_query_returns_plain_text(self):
+        self.plugin._schaledb_client = SimpleNamespace(
+            last_error=None,
+            get_birthdays_with_ids=AsyncMock(
+                return_value=[
+                    ("星野", "1/2", 1),
+                    ("日富美", "11/27", 2),
+                ]
+            ),
+        )
+        event = SimpleNamespace(plain_result=lambda text: text)
+
+        results = [
+            result async for result in self.plugin._handle_birthday(event, "星野")
+        ]
+
+        self.assertEqual(results, ["星野的生日是 1/2。"])
+
+    async def test_birthday_month_query_renders_only_that_month(self):
+        self.plugin.config["basic_settings"]["message_mode"] = "card"
+        self.plugin._schaledb_client = SimpleNamespace(
+            last_error=None,
+            asset_errors=[],
+            get_birthdays_with_ids=AsyncMock(
+                return_value=[
+                    ("星野", "1/2", 1),
+                    ("日富美", "1/27", 2),
+                    ("梓", "2/1", 3),
+                ]
+            ),
+            get_student_icons_by_id=AsyncMock(return_value={"1": "hoshino.webp"}),
+        )
+        self.plugin._render_in_thread = AsyncMock(return_value=b"calendar")
+        self.plugin._store_card = lambda _data: "birthday.png"
+        event = SimpleNamespace(
+            plain_result=lambda text: text,
+            image_result=lambda path: path,
+        )
+
+        with patch.object(main_module, "BirthdayCard") as card_type:
+            results = [
+                result async for result in self.plugin._handle_birthday(event, "1月")
+            ]
+
+        card_type.assert_called_once()
+        self.assertEqual(
+            card_type.call_args.kwargs["students"],
+            [("星野", "1/2"), ("日富美", "1/27")],
+        )
+        self.assertEqual(card_type.call_args.kwargs["month"], 1)
+        self.assertEqual(card_type.call_args.kwargs["student_icons"], {"星野": "hoshino.webp"})
+        self.assertEqual(results, ["birthday.png"])
+
+    async def test_birthday_month_query_rejects_invalid_month(self):
+        self.plugin._schaledb_client = SimpleNamespace(
+            get_birthdays_with_ids=AsyncMock()
+        )
+        event = SimpleNamespace(plain_result=lambda text: text)
+
+        results = [
+            result async for result in self.plugin._handle_birthday(event, "13月")
+        ]
+
+        self.assertEqual(results, ["月份无效，请输入 1月 到 12月。"])
+        self.plugin._schaledb_client.get_birthdays_with_ids.assert_not_awaited()
+
     async def test_guide_command_without_student_name_prompts_for_partial_name(self):
         plugin = BAToolbox.__new__(BAToolbox)
         plugin.config = {"command_settings": {"guide_query": ["学生攻略"]}}
