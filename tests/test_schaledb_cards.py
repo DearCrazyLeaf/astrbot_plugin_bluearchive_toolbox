@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -1277,7 +1278,9 @@ class StudentDetailCardTests(unittest.TestCase):
 
         all_events = [{"title": f"活动{i}", "pub_area": "日服"} for i in range(12)]
         all_card = ScheduleCard(events=all_events, region="all")
-        self.assertEqual(all_card._build_html().count('<article class="row">'), 12)
+        self.assertEqual(
+            all_card._build_html().count('<article class="schedule-row">'), 12
+        )
 
     def test_schedule_pool_and_birthday_cards_reference_bundled_font_url(self):
         for html in (
@@ -1291,6 +1294,35 @@ class StudentDetailCardTests(unittest.TestCase):
                     "https://ba-assets.local/fonts/ResourceHanRoundedCN.ttf", html
                 )
                 self.assertIn("'ResourceHanRounded'", html)
+                self.assertIn("'BA Compact'", html)
+
+    def test_schedule_pool_and_birthday_cards_reuse_dashboard_icons_and_canvas(self):
+        plugin_root = Path(__file__).resolve().parents[1]
+        cards = (
+            (ScheduleCard(), "collectible_icon_guidemission_s15_1.webp"),
+            (CardPoolCard(pools=[]), "collectible_icon_guidemission01.webp"),
+            (BirthdayCard(), "item_icon_favor_26.webp"),
+        )
+
+        for card, icon_name in cards:
+            with self.subTest(card=type(card).__name__):
+                icon_path = (
+                    plugin_root / "views" / "ba-toolbox" / "assets" / "icons" / icon_name
+                )
+                icon_data = base64.b64encode(icon_path.read_bytes()).decode("ascii")
+                rendered_html = card._build_html()
+                self.assertIn(f"data:image/webp;base64,{icon_data}", rendered_html)
+                self.assertIn("border-radius: 20px", rendered_html)
+                self.assertIn("Noto Sans CJK SC", rendered_html)
+                self.assertIn("center/cover no-repeat; transform: scale(1.35)", rendered_html)
+
+                with patch.object(
+                    card._renderer, "render", return_value=b"png"
+                ) as render:
+                    card.render()
+                render.assert_called_once_with(
+                    rendered_html, card.CARD_W, card.CARD_H, framed=False
+                )
 
     def test_pool_and_birthday_cards_render_student_avatars_when_available(self):
         with TemporaryDirectory() as temp_dir:
@@ -1313,7 +1345,7 @@ class StudentDetailCardTests(unittest.TestCase):
 
             pool_html = pool._build_html()
             birthday_html = birthday._build_html()
-        self.assertEqual(pool_html.count('class="row-avatar"'), 2)
+        self.assertEqual(pool_html.count('class="pool-avatar"'), 2)
         self.assertIn('class="birthday-avatar"', birthday_html)
         self.assertIn('src="data:image/webp;base64,', birthday_html)
 
@@ -1322,8 +1354,73 @@ class StudentDetailCardTests(unittest.TestCase):
             students=[(f"Student {index}", f"1/{index}") for index in range(24)]
         )
 
-        self.assertEqual(birthday.CARD_H, 812)
-        self.assertIn("height: 812px", birthday._build_html())
+        self.assertEqual(birthday.CARD_H, 574)
+        self.assertIn("min-height: 574px", birthday._build_html())
+
+    def test_pool_card_keeps_long_student_lists_in_wrapped_member_grid(self):
+        names = [
+            "星野（泳装）",
+            "白子（泳装）",
+            "野宫（泳装）",
+            "日和（泳装）",
+            "美咲（泳装）",
+            "梓（泳装）",
+            "伊吕波",
+            "爱丽丝（礼服）",
+            "黑馆晴奈",
+            "千世",
+            "空崎日奈（礼服）",
+        ]
+        card = CardPoolCard(
+            pools=[
+                {
+                    "title": f"卡池：{'、'.join(names)}",
+                    "students": names,
+                    "start_at": 1761955200,
+                    "end_at": 1762041600,
+                    "pub_area": "国际服",
+                },
+                {
+                    "title": "卡池：美游、时雨、冬",
+                    "students": ["美游", "时雨", "冬"],
+                    "start_at": 1761955200,
+                    "end_at": 1762041600,
+                    "pub_area": "日服",
+                },
+            ],
+            region="all",
+        )
+        rendered_html = card._build_html()
+
+        self.assertEqual(card.CARD_H, 496)
+        self.assertIn("grid-template-columns: repeat(4,minmax(0,1fr))", rendered_html)
+        for name in names:
+            self.assertIn(name, rendered_html)
+        self.assertEqual(rendered_html.count('class="pool-row"'), 2)
+        self.assertEqual(rendered_html.count("<time>"), 2)
+
+    def test_schedule_card_height_accounts_for_wrapped_event_titles(self):
+        title = "维护结束后将开放新的活动任务与特别奖励，记得领取" * 2
+        card = ScheduleCard(
+            events=[
+                {"title": title, "pub_area": "国服"},
+                {"title": title, "pub_area": "国际服"},
+                {"title": title, "pub_area": "日服"},
+            ]
+        )
+
+        self.assertEqual(card.CARD_H, 365)
+        self.assertEqual(card._build_html().count(title), 3)
+
+    def test_birthday_card_counts_long_names_when_estimating_wrapped_rows(self):
+        students = [
+            (f"日富美活动特别推荐版本学生名称测试{index}", "11/27")
+            for index in range(12)
+        ]
+        birthday = BirthdayCard(students=students)
+
+        self.assertGreater(birthday.CARD_H, 220)
+        self.assertIn("日富美活动特别推荐版本学生名称测试11", birthday._build_html())
 
 
 if __name__ == "__main__":

@@ -76,6 +76,46 @@
     status.dataset.kind = kind;
   }
 
+  async function copySourceUrl(url) {
+    let clipboardError = "";
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+        byId("source-link-status").textContent =
+          `网址已复制，请粘贴到浏览器访问：${url}`;
+        return;
+      }
+    } catch (error) {
+      clipboardError = error instanceof Error ? error.message : String(error);
+    }
+
+    const input = document.createElement("textarea");
+    input.value = url;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.append(input);
+    let copied = false;
+    try {
+      input.select();
+      copied = document.execCommand("copy");
+    } catch (error) {
+      clipboardError = error instanceof Error ? error.message : String(error);
+    } finally {
+      input.remove();
+    }
+    if (copied) {
+      byId("source-link-status").textContent =
+        `网址已复制，请粘贴到浏览器访问：${url}`;
+    } else {
+      const reason = clipboardError
+        ? `浏览器未允许剪贴板访问（${clipboardError}）`
+        : "浏览器未允许访问剪贴板";
+      byId("source-link-status").textContent =
+        `自动复制失败（${reason}），请手动复制网址：${url}`;
+    }
+  }
+
   async function checkPluginStatus() {
     const badge = byId("plugin-status");
     const label = byId("plugin-status-text");
@@ -388,6 +428,42 @@
     return `/api/v1/plugins/extensions/${encodeURIComponent(pluginId)}${path}`;
   }
 
+  function showPollImageError(imageLink, imageUrl, message) {
+    const error = document.createElement("div");
+    error.className = "poll-card-error";
+    const detail = document.createElement("p");
+    detail.textContent = `卡片图片加载失败：${message}`;
+    const endpointLink = document.createElement("a");
+    endpointLink.className = "poll-card-error-link";
+    endpointLink.href = imageUrl;
+    endpointLink.target = "_blank";
+    endpointLink.rel = "noopener noreferrer";
+    endpointLink.textContent = "打开图片接口响应以查看详情";
+    error.append(detail, endpointLink);
+    imageLink.replaceWith(error);
+  }
+
+  async function loadPollImage(image, imageLink, imageEndpoint) {
+    const imageUrl = imageLink.href;
+    try {
+      const payload = await bridge.apiGet(imageEndpoint);
+      if (!payload?.image) {
+        throw new Error("接口响应中没有卡片图片数据");
+      }
+      image.src = `data:${payload.content_type || "image/png"};base64,${payload.image}`;
+      image.addEventListener("error", () => {
+        showPollImageError(
+          imageLink,
+          imageUrl,
+          "图片数据已返回，但浏览器无法解码",
+        );
+      }, { once: true });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      showPollImageError(imageLink, imageUrl, reason);
+    }
+  }
+
   function renderPollEntries(payload) {
     const host = byId("poll-archive-cards");
     const entries = Array.isArray(payload.entries) ? payload.entries : [];
@@ -448,21 +524,17 @@
         imageLink.href = pluginEndpoint(
           `/poll-archive/${encodeURIComponent(payload.date)}/${encodeURIComponent(entry.category)}/${encodeURIComponent(entry.run_id)}`,
         );
+        const imageEndpoint =
+          `/poll-archive/${encodeURIComponent(payload.date)}/${encodeURIComponent(entry.category)}/${encodeURIComponent(entry.run_id)}/preview`;
         imageLink.target = "_blank";
         imageLink.rel = "noopener noreferrer";
         imageLink.setAttribute("aria-label", `打开${title.textContent}卡片原图`);
         const image = document.createElement("img");
         image.loading = "lazy";
         image.alt = `${title.textContent}轮询卡片预览`;
-        image.src = imageLink.href;
-        image.addEventListener("error", () => {
-          const error = document.createElement("p");
-          error.className = "poll-card-error";
-          error.textContent = "卡片图片读取失败，请刷新记录或检查插件日志。";
-          imageLink.replaceWith(error);
-        }, { once: true });
         imageLink.append(image);
         card.append(imageLink);
+        void loadPollImage(image, imageLink, imageEndpoint);
       } else {
         const error = document.createElement("p");
         error.className = "poll-card-error";
@@ -541,6 +613,12 @@
   });
   document.querySelectorAll("[data-go]").forEach((button) => {
     button.addEventListener("click", () => showView(button.dataset.go));
+  });
+  byId("view-sources").addEventListener("click", (event) => {
+    const link = event.target.closest("a[href^='https://']");
+    if (!link) return;
+    event.preventDefault();
+    void copySourceUrl(link.href);
   });
   byId("theme-toggle").addEventListener("click", () => {
     manualTheme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";

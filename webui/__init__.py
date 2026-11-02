@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -9,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api.web import error_response, file_response, json_response, request
-
 
 _PLUGIN_ID = "astrbot_plugin_bluearchive_toolbox"
 
@@ -55,6 +55,12 @@ class BAToolboxWebUI:
             self.poll_archive_image,
             ["GET"],
             "BA Toolbox archived poll card",
+        )
+        self.plugin.context.register_web_api(
+            f"/{_PLUGIN_ID}/poll-archive/<archive_date>/<category>/<run_id>/preview",
+            self.poll_archive_image_preview,
+            ["GET"],
+            "BA Toolbox archived poll card preview",
         )
 
     @staticmethod
@@ -140,6 +146,23 @@ class BAToolboxWebUI:
             self.plugin._log_warn("webui", "poll archive image read failed", error=exc)
             return error_response("读取轮询卡片失败", status_code=500)
         return file_response(path, content_type="image/png")
+
+    async def poll_archive_image_preview(
+        self, archive_date: str, category: str, run_id: str
+    ):
+        try:
+            path = self.plugin.poll_archive.image_path(
+                archive_date, category, run_id
+            )
+            image = base64.b64encode(path.read_bytes()).decode("ascii")
+        except ValueError:
+            return error_response("轮询卡片地址无效", status_code=400)
+        except FileNotFoundError:
+            return error_response("轮询卡片不存在", status_code=404)
+        except OSError as exc:
+            self.plugin._log_warn("webui", "poll archive image read failed", error=exc)
+            return error_response("读取轮询卡片失败", status_code=500)
+        return json_response({"data": {"image": image, "content_type": "image/png"}})
 
     def _schema(self) -> dict[str, Any]:
         try:

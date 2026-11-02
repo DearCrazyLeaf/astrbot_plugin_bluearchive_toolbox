@@ -108,6 +108,12 @@ def _font_face_css() -> str:
         font-weight: normal;
         font-style: normal;
     }}
+    @font-face {{
+        font-family: 'BA Compact';
+        src: url('{FONT_BLUAKA_URI}') format('truetype');
+        font-weight: 400;
+        font-style: normal;
+    }}
     """
 
 
@@ -117,7 +123,14 @@ FONT_CSS = _font_face_css()
 class HTMLCardRenderer:
     """基于 Playwright 的 HTML 卡片渲染器。"""
 
-    def _render_html(self, html_content: str, width: int, height: int | None) -> bytes:
+    def _render_html(
+        self,
+        html_content: str,
+        width: int,
+        height: int | None,
+        *,
+        full_page: bool | None = None,
+    ) -> bytes:
         """使用 Playwright 渲染 HTML 并返回 PNG 字节。"""
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -175,7 +188,10 @@ class HTMLCardRenderer:
                 page.route("**/*", handle_route)
                 page.set_content(html_content, wait_until="domcontentloaded")
                 page.evaluate("() => document.fonts.ready.then(() => true)")
-                return page.screenshot(full_page=height is None, type="png")
+                return page.screenshot(
+                    full_page=height is None if full_page is None else full_page,
+                    type="png",
+                )
             finally:
                 browser.close()
 
@@ -223,7 +239,9 @@ class HTMLCardRenderer:
         </html>
         """
 
-    def render(self, inner_html: str, width: int, height: int) -> bytes:
+    def render(
+        self, inner_html: str, width: int, height: int, *, framed: bool = True
+    ) -> bytes:
         """渲染完整卡片并返回 PNG 字节。"""
-        html = self._wrap_bg(inner_html, width, height)
-        return self._render_html(html, width, height)
+        html = self._wrap_bg(inner_html, width, height) if framed else inner_html
+        return self._render_html(html, width, height, full_page=not framed)

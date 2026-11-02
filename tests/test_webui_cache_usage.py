@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import sys
 import unittest
@@ -44,6 +45,40 @@ if stubbed_astrbot:
 
 
 class CacheUsageTests(unittest.TestCase):
+    def test_poll_archive_preview_returns_base64_image_for_dashboard_bridge(self):
+        with TemporaryDirectory() as temp_dir:
+            archive = importlib.import_module(
+                "astrbot_plugin_bluearchive_toolbox.poll_archive"
+            ).PollArchive(temp_dir)
+            archive.save_result(
+                archive_date="2025-03-08",
+                run_id="20250308T080000",
+                category="schedule",
+                region="all",
+                item_count=1,
+                image=b"png-card",
+            )
+            plugin = SimpleNamespace(
+                poll_archive=archive,
+                _log_warn=lambda *_args, **_kwargs: None,
+            )
+            with patch.object(
+                webui_module,
+                "json_response",
+                side_effect=lambda payload: payload,
+            ):
+                result = asyncio.run(
+                    BAToolboxWebUI(plugin).poll_archive_image_preview(
+                        "2025-03-08", "schedule", "20250308T080000"
+                    )
+                )
+
+        self.assertEqual(
+            result["data"]["image"],
+            base64.b64encode(b"png-card").decode("ascii"),
+        )
+        self.assertEqual(result["data"]["content_type"], "image/png")
+
     def test_usage_sums_each_managed_cache_category(self):
         with TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
