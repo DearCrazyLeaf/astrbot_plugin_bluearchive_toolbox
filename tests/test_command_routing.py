@@ -41,15 +41,13 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
                 "detail_query": ["学生", "ba_student"],
                 "menu_timeout_seconds": 600,
                 "face_pool": ["14", "9"],
+                "student_choice_timeout_seconds": 120,
+                "student_choice_max_active_menus": 3,
+                "student_choice_face_pool": [],
                 "menu_items": [
                     {"label": "学生生日", "command": "生日"},
                     {"label": "卡池", "command": "千里眼", "face_id": "66"},
                 ],
-            },
-            "student_choice_settings": {
-                "timeout_seconds": 120,
-                "max_active_menus": 3,
-                "face_pool": [],
             },
             "debug_settings": {"debug_log": True},
         }
@@ -203,6 +201,78 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
                 {"label": "自定义卡池", "command": "/千里眼", "face_id": "66"},
                 {"label": "活动日程", "command": "活动", "face_id": ""},
             ],
+        )
+
+    def test_default_menu_labels_add_emojis_without_changing_commands(self):
+        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        menu_items = schema["menu_settings"]["items"]["menu_items"]["default"]
+
+        self.assertEqual(
+            [(item["label"], item["command"]) for item in menu_items],
+            [
+                ("👤 学生详情", "学生"),
+                ("🎂 学生生日", "生日"),
+                ("🔮 卡池千里眼", "千里眼"),
+                ("📅 活动日程", "活动"),
+                ("📖 攻略查询", "攻略"),
+            ],
+        )
+
+    def test_reaction_menu_uses_configurable_footer_and_divider(self):
+        self.plugin.config["menu_settings"].update(
+            {
+                "menu_title": "自定义菜单",
+                "menu_divider_char": "=",
+                "menu_divider_length": 4,
+                "menu_footer_text": "自定义说明",
+                "menu_items": [{"label": "生日", "command": "生日"}],
+            }
+        )
+
+        self.assertEqual(
+            self.plugin._build_reaction_menu_text(),
+            "自定义菜单\n====\n  1. 生日\n====\n自定义说明",
+        )
+
+    async def test_student_choice_menu_uses_shared_divider_and_custom_footer(self):
+        self.plugin.config["menu_settings"].update(
+            {
+                "menu_divider_char": "=",
+                "menu_divider_length": 4,
+                "student_choice_title": "🎓 自定义学生选择",
+                "student_choice_footer_text": "候选菜单说明",
+            }
+        )
+        bot = SimpleNamespace(
+            send_group_msg=AsyncMock(return_value={"message_id": "candidate-menu"}),
+            set_msg_emoji_like=AsyncMock(),
+        )
+        event = SimpleNamespace(
+            bot=bot,
+            get_group_id=lambda: "123456",
+            get_sender_id=lambda: "789",
+        )
+        with patch.object(main_module.asyncio, "sleep", new_callable=AsyncMock):
+            sent, _ = await self.plugin._start_student_choice(
+                event,
+                "Alice",
+                [{"Id": 1, "Name": "Alice", "_data_source_language": "cn"}],
+                "cn",
+                primary_name="Alice",
+            )
+
+        self.assertTrue(sent)
+        self.assertEqual(
+            bot.send_group_msg.await_args.kwargs["message"],
+            "🎓 自定义学生选择\n"
+            "====\n"
+            "「Alice」最接近「Alice」，以下是该学生的形态，请选择：\n"
+            "====\n"
+            "1. Alice（国服数据）\n"
+            "2. 取消查询\n"
+            "====\n"
+            "候选菜单说明",
         )
 
     def test_menu_text_selection_matches_number_label_and_command(self):
@@ -675,9 +745,13 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, ["second"])
 
     async def test_student_choice_menus_have_per_group_limit_and_custom_settings(self):
-        settings = self.plugin.config["student_choice_settings"]
+        settings = self.plugin.config["menu_settings"]
         settings.update(
-            {"timeout_seconds": 45, "max_active_menus": 2, "face_pool": ["18", "23"]}
+            {
+                "student_choice_timeout_seconds": 45,
+                "student_choice_max_active_menus": 2,
+                "student_choice_face_pool": ["18", "23"],
+            }
         )
         bot = SimpleNamespace(
             send_group_msg=AsyncMock(

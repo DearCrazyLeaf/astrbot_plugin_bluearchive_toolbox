@@ -132,12 +132,12 @@
         }
     },
     "menu_settings": {
-        "description": "表情回应菜单",
+        "description": "BA 回应菜单（主菜单与学生选择菜单）",
         "type": "object",
-        "hint": "在群聊发送菜单关键词生成带表情回应的 BA 功能菜单；点击表情或回复序号/菜单项可触发对应查询指令",
+        "hint": "此配置块包含主菜单和学生选择菜单，主菜单用于群内快捷查询；学生选择菜单的项目专门控制学生模糊匹配后的选择菜单，其余菜单样式配置由两类菜单共用",
         "items": {
             "menu_keywords": {
-                "description": "菜单触发关键词",
+                "description": "主菜单触发关键词",
                 "type": "list",
                 "default": [
                     "菜单",
@@ -161,12 +161,12 @@
                 }
             },
             "menu_title": {
-                "description": "菜单标题",
+                "description": "主菜单标题",
                 "type": "string",
                 "default": "📘 BA 工具箱菜单"
             },
             "menu_timeout_seconds": {
-                "description": "菜单有效期（秒）",
+                "description": "主菜单有效期（秒）",
                 "type": "int",
                 "default": 600,
                 "hint": "过期后点击表情或回复菜单项不再触发指令"
@@ -184,17 +184,98 @@
             "menu_repeat_reply": {
                 "description": "重复菜单提示",
                 "type": "string",
-                "default": "当前菜单仍然有效，请点击表情或回复菜单项进行查询。"
+                "default": "当前菜单仍然有效，请点击表情或回复菜单项进行查询"
             },
             "menu_divider_char": {
-                "description": "菜单分隔符",
+                "description": "菜单通用分隔符",
                 "type": "string",
                 "default": "─"
             },
             "menu_divider_length": {
                 "description": "分隔符长度",
                 "type": "int",
-                "default": 28
+                "default": 32
+            },
+            "menu_footer_text": {
+                "description": "主菜单底部说明",
+                "type": "string",
+                "default": "点击下方对应表情，或回复序号/菜单名称触发查询",
+                "hint": "显示在主体菜单最下方的说明文字；留空则不显示"
+            },
+            "menu_items": {
+                "description": "主菜单项目列表",
+                "type": "list",
+                "default": [
+                    {
+                        "label": "👤 学生详情",
+                        "command": "学生",
+                        "face_id": "9"
+                    },
+                    {
+                        "label": "🎂 学生生日",
+                        "command": "生日",
+                        "face_id": "14"
+                    },
+                    {
+                        "label": "🔮 卡池千里眼",
+                        "command": "千里眼"
+                    },
+                    {
+                        "label": "📅 活动日程",
+                        "command": "活动"
+                    },
+                    {
+                        "label": "📖 攻略查询",
+                        "command": "攻略"
+                    }
+                ],
+                "hint": "菜单项执行快捷查询指令，学生详情/攻略请按要求输入完整指令，例如“学生 日富美”或“攻略 日富美（赛车）”；攻略查询按学生名称搜索，不区分服务器",
+                "items": {
+                    "label": {
+                        "type": "string",
+                        "default": ""
+                    },
+                    "command": {
+                        "type": "string",
+                        "default": ""
+                    },
+                    "face_id": {
+                        "type": "string",
+                        "default": ""
+                    }
+                }
+            },
+            "student_choice_title": {
+                "description": "学生选择菜单标题",
+                "type": "string",
+                "default": "🎓 学生选择菜单"
+            },
+            "student_choice_footer_text": {
+                "description": "学生选择菜单底部说明",
+                "type": "string",
+                "default": "点击表情或回复序号/名称查询，选择后菜单仍然有效，点击取消查询则关闭菜单",
+                "hint": "显示在学生模糊匹配结果菜单最下方；留空则不显示"
+            },
+            "student_choice_timeout_seconds": {
+                "description": "学生选择菜单有效期（秒）",
+                "type": "int",
+                "default": 120,
+                "hint": "学生模糊匹配菜单发出后开始计时，有效范围为 10–3600 秒"
+            },
+            "student_choice_max_active_menus": {
+                "description": "每群最多同时存在的学生选择菜单数",
+                "type": "int",
+                "default": 3,
+                "hint": "有效范围为 1–3；达到上限后保留已有菜单并拒绝创建新菜单"
+            },
+            "student_choice_face_pool": {
+                "description": "学生选择菜单专用 QQ 表情 ID",
+                "type": "list",
+                "default": [],
+                "hint": "用于学生模糊匹配菜单；留空时沿用主菜单 face_pool，候选数量不足时会继续使用插件内置表情",
+                "items": {
+                    "type": "string"
+                }
             },
             "menu_max_reactions": {
                 "description": "菜单最多贴附表情数",
@@ -244,77 +325,6 @@
                     "201"
                 ],
                 "hint": "每个菜单项按顺序分配一个表情 ID；菜单项可单独指定 face_id 覆盖",
-                "items": {
-                    "type": "string"
-                }
-            },
-            "menu_items": {
-                "description": "菜单项目列表",
-                "type": "list",
-                "default": [
-                    {
-                        "label": "学生详情",
-                        "command": "学生",
-                        "face_id": "9"
-                    },
-                    {
-                        "label": "学生生日",
-                        "command": "生日",
-                        "face_id": "14"
-                    },
-                    {
-                        "label": "卡池千里眼",
-                        "command": "千里眼"
-                    },
-                    {
-                        "label": "活动日程",
-                        "command": "活动"
-                    },
-                    {
-                        "label": "攻略查询",
-                        "command": "攻略"
-                    }
-                ],
-                "hint": "菜单项执行快捷查询指令，学生详情/攻略请按要求输入完整指令，例如“学生 日富美”或“攻略 日富美（赛车）”；攻略查询按学生名称搜索，不区分服务器",
-                "items": {
-                    "label": {
-                        "type": "string",
-                        "default": ""
-                    },
-                    "command": {
-                        "type": "string",
-                        "default": ""
-                    },
-                    "face_id": {
-                        "type": "string",
-                        "default": ""
-                    }
-                }
-            }
-        }
-    },
-    "student_choice_settings": {
-        "description": "学生候选菜单",
-        "hint": "手动学生查询匹配到多个结果时使用；不同候选菜单可同时存在，达到并发上限时拒绝新菜单，不影响已有菜单",
-        "type": "object",
-        "items": {
-            "timeout_seconds": {
-                "description": "候选菜单有效期（秒）",
-                "type": "int",
-                "default": 120,
-                "hint": "从候选菜单发出后开始计时，建议设置为 10–3600 秒"
-            },
-            "max_active_menus": {
-                "description": "每个群最多同时存在的候选菜单数",
-                "type": "int",
-                "default": 3,
-                "hint": "有效范围为 1–3；达到上限后保留已有菜单并拒绝创建新菜单"
-            },
-            "face_pool": {
-                "description": "候选菜单专用 QQ 表情 ID",
-                "type": "list",
-                "default": [],
-                "hint": "留空时沿用表情回应菜单的 face_pool；候选数量不足时会继续使用插件内置表情",
                 "items": {
                     "type": "string"
                 }

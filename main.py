@@ -667,7 +667,7 @@ class BAToolbox(Star):
         settings = self.config.get("menu_settings", {})
         return settings if isinstance(settings, dict) else {}
 
-    def _student_choice_settings(self) -> dict[str, Any]:
+    def _legacy_student_choice_settings(self) -> dict[str, Any]:
         settings = self.config.get("student_choice_settings", {})
         return settings if isinstance(settings, dict) else {}
 
@@ -703,8 +703,11 @@ class BAToolbox(Star):
     def _student_choice_timeout(self) -> int:
         try:
             timeout = int(
-                self._student_choice_settings().get(
-                    "timeout_seconds", STUDENT_CHOICE_TIMEOUT
+                self._menu_settings().get(
+                    "student_choice_timeout_seconds",
+                    self._legacy_student_choice_settings().get(
+                        "timeout_seconds", STUDENT_CHOICE_TIMEOUT
+                    ),
                 )
             )
         except (TypeError, ValueError):
@@ -713,7 +716,14 @@ class BAToolbox(Star):
 
     def _student_choice_max_active_menus(self) -> int:
         try:
-            limit = int(self._student_choice_settings().get("max_active_menus", 3))
+            limit = int(
+                self._menu_settings().get(
+                    "student_choice_max_active_menus",
+                    self._legacy_student_choice_settings().get(
+                        "max_active_menus", 3
+                    ),
+                )
+            )
         except (TypeError, ValueError):
             limit = 3
         return max(1, min(limit, 3))
@@ -1073,11 +1083,30 @@ class BAToolbox(Star):
                 f"仅显示优先级最高的 {len(shown_candidates)} 项，共有 {len(candidates)} 项；"
                 "可输入更具体的学生名称缩小范围。"
             )
-        lines.append(
-            "群内任何人都可点击表情查询；发起者可回复此消息选择序号/名称。"
-            "选择后菜单继续有效，点击取消查询关闭菜单。"
+        menu_settings = self._menu_settings()
+        footer_text = str(
+            menu_settings.get(
+                "student_choice_footer_text",
+                self._legacy_student_choice_settings().get(
+                    "footer_text",
+                    "群内任何人都可点击表情查询；发起者可回复此消息选择序号/名称。"
+                    "选择后菜单继续有效，点击取消查询关闭菜单。",
+                ),
+            )
+            or ""
         )
-        prompt = "\n".join(lines)
+        divider = self._menu_divider_line()
+        prompt_lines = [
+            str(menu_settings.get("student_choice_title", "🎓 学生选择菜单")),
+            divider,
+            lines[0],
+            divider,
+            *lines[1:],
+            divider,
+        ]
+        if footer_text:
+            prompt_lines.append(footer_text)
+        prompt = "\n".join(prompt_lines)
 
         try:
             response = await bot.send_group_msg(
@@ -1098,7 +1127,10 @@ class BAToolbox(Star):
 
         choice["message_id"] = message_id
         self._student_candidate_menus[message_id] = choice
-        face_pool = self._student_choice_settings().get("face_pool", [])
+        face_pool = self._menu_settings().get(
+            "student_choice_face_pool",
+            self._legacy_student_choice_settings().get("face_pool", []),
+        )
         if not face_pool:
             face_pool = self._menu_settings().get("face_pool", [])
         if isinstance(face_pool, str):
@@ -1178,23 +1210,36 @@ class BAToolbox(Star):
 
     def _build_reaction_menu_text(self) -> str:
         settings = self._menu_settings()
-        divider = str(settings.get("menu_divider_char", "─"))[:1] or "─"
-        divider_length = max(1, min(int(settings.get("menu_divider_length", 28)), 80))
+        divider = self._menu_divider_line()
         lines = [
             str(settings.get("menu_title", "📘 BA 工具箱菜单")),
-            divider * divider_length,
+            divider,
         ]
         lines.extend(
             f"  {index}. {item['label']}"
             for index, item in enumerate(self._menu_items(), start=1)
         )
-        lines.extend(
-            [
-                divider * divider_length,
-                "点击下方对应表情，或回复序号/菜单名称触发查询。",
-            ]
+        lines.append(divider)
+        footer_text = str(
+            settings.get(
+                "menu_footer_text",
+                "👆 下方按顺序贴表情，第1个表情对应第1项，第2个表情对应第2项。"
+                "也可直接回复序号或菜单内容触发。",
+            )
+            or ""
         )
+        if footer_text:
+            lines.append(footer_text)
         return "\n".join(lines)
+
+    def _menu_divider_line(self) -> str:
+        settings = self._menu_settings()
+        divider = str(settings.get("menu_divider_char", "─"))[:1] or "─"
+        try:
+            divider_length = int(settings.get("menu_divider_length", 28))
+        except (TypeError, ValueError):
+            divider_length = 28
+        return divider * max(1, min(divider_length, 80))
 
     async def _send_reaction_menu(self, event: AstrMessageEvent) -> bool:
         group_id = str(event.get_group_id() or "")
