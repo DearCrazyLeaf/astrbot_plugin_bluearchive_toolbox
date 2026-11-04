@@ -121,6 +121,7 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
     def test_reads_user_aliases_from_student_search_settings(self):
         self.plugin.config["student_search_settings"] = {
             "custom_aliases": ["啊露=爱露", "泳装星野=星野", "无效条目"],
+            "arona_form_aliases": ["新年=和服", "泳装=水着", "无效条目"],
             "llm_enabled": True,
         }
 
@@ -128,7 +129,23 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.plugin._student_search_aliases(),
             {"啊露": "爱露", "泳装星野": "星野"},
         )
+        self.assertEqual(
+            self.plugin._arona_form_aliases(),
+            {"新年": "和服", "泳装": "水着"},
+        )
         self.assertTrue(self.plugin._student_llm_enabled())
+
+    def test_schema_preloads_arona_form_aliases(self):
+        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        aliases = schema["student_search_settings"]["items"][
+            "arona_form_aliases"
+        ]["default"]
+
+        self.assertIn("新年=正月", aliases)
+        self.assertIn("レーシング=赛车", aliases)
+        self.assertIn("武装=临战", aliases)
+        self.assertIn("邦妮=兔女郎", aliases)
 
     def test_command_triggers_support_plain_and_slash_forms(self):
         commands = ["学生", "ba_student"]
@@ -275,6 +292,58 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
             "候选菜单说明",
         )
 
+    async def test_student_choice_labels_use_release_region_not_data_language(self):
+        bot = SimpleNamespace(
+            send_group_msg=AsyncMock(return_value={"message_id": "candidate-menu"}),
+            set_msg_emoji_like=AsyncMock(),
+        )
+        event = SimpleNamespace(
+            bot=bot,
+            get_group_id=lambda: "123456",
+            get_sender_id=lambda: "789",
+        )
+        with patch.object(main_module.asyncio, "sleep", new_callable=AsyncMock):
+            sent, _ = await self.plugin._start_student_choice(
+                event,
+                "日富美",
+                [
+                    {
+                        "Id": 10153,
+                        "Name": "日富美（赛车）",
+                        "_data_source_language": "cn",
+                        "_released_regions": ["日服"],
+                    }
+                ],
+                "cn",
+                primary_name="日富美",
+            )
+
+        self.assertTrue(sent)
+        message = bot.send_group_msg.await_args.kwargs["message"]
+        self.assertIn("1. 日富美（赛车）（日服实装）", message)
+
+    def test_student_release_label_collapses_all_servers_and_lists_partial_release(self):
+        self.assertEqual(
+            self.plugin._student_release_label(
+                {"_released_regions": ["日服", "国际服", "国服"]}
+            ),
+            "全服",
+        )
+        self.assertEqual(
+            self.plugin._student_release_label(
+                {"_released_regions": ["日服", "国际服"]}
+            ),
+            "日服、国际服实装",
+        )
+        self.assertEqual(
+            self.plugin._student_release_label({"_released_regions": ["日服"]}),
+            "日服实装",
+        )
+        self.assertEqual(
+            self.plugin._student_release_label({"_released_regions": []}),
+            "未实装",
+        )
+
     def test_menu_text_selection_matches_number_label_and_command(self):
         self.plugin._active_menus = {
             "menu-message": {
@@ -323,6 +392,15 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         plugin._schaledb_client = SimpleNamespace(
             search_student_candidates=AsyncMock(return_value=candidates)
+        )
+        plugin._arona_client = SimpleNamespace(
+            get_guide_image=AsyncMock(
+                side_effect=[
+                    "https://example.test/hoshino.png",
+                    "https://example.test/swimsuit.png",
+                ]
+            ),
+            last_error=None,
         )
         plugin._start_student_choice = AsyncMock(return_value=(True, "菜单"))
         event = SimpleNamespace(unified_msg_origin="", plain_result=lambda text: text)
@@ -445,6 +523,52 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
         plugin._arona_client.get_guide_image.assert_awaited_once_with("爱丽丝")
         self.assertEqual(results, [("image", "https://example.test/guide.png")])
 
+    async def test_guide_adapts_form_name_before_exact_arona_lookup(self):
+        plugin = BAToolbox.__new__(BAToolbox)
+        plugin.config = {"basic_settings": {"student_data_language": "cn"}}
+        plugin._schaledb_client = SimpleNamespace(
+            search_student_candidates=AsyncMock(
+                return_value=[{"Id": 10066, "PathName": "aris_maid", "Name": "爱丽丝（女仆）"}]
+            )
+        )
+        plugin._arona_client = SimpleNamespace(
+            get_guide_image=AsyncMock(return_value="https://example.test/maid.png"),
+            last_error=None,
+        )
+        event = SimpleNamespace(
+            unified_msg_origin="",
+            image_result=lambda url: ("image", url),
+            plain_result=lambda text: ("text", text),
+        )
+
+        results = [
+            result async for result in plugin._handle_guide(event, "爱丽丝（女仆）")
+        ]
+
+        plugin._arona_client.get_guide_image.assert_awaited_once_with("女仆爱丽丝")
+        self.assertEqual(results, [("image", "https://example.test/maid.png")])
+
+    async def test_guide_uses_configured_form_alias_before_arona_lookup(self):
+        plugin = BAToolbox.__new__(BAToolbox)
+        plugin.config = {
+            "student_search_settings": {"arona_form_aliases": ["新年=和服"]}
+        }
+        plugin._arona_client = SimpleNamespace(
+            get_guide_image=AsyncMock(return_value="https://example.test/aru.png"),
+            last_error=None,
+        )
+
+        candidates = await plugin._resolve_guide_candidates(
+            [{"Id": 1, "PathName": "aru_newyear", "Name": "爱露（新年）"}]
+        )
+
+        plugin._arona_client.get_guide_image.assert_awaited_once_with("和服爱露")
+        self.assertEqual(candidates[0]["_arona_guide_name"], "和服爱露")
+        self.assertEqual(
+            candidates[0]["_arona_guide_url"],
+            "https://example.test/aru.png",
+        )
+
     async def test_guide_asks_confirmation_for_approximate_student_suggestions(self):
         plugin = BAToolbox.__new__(BAToolbox)
         plugin.config = {"basic_settings": {"student_data_language": "cn"}}
@@ -457,21 +581,41 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
         plugin._schaledb_client = SimpleNamespace(
             search_student_candidates=AsyncMock(return_value=candidates)
         )
+        plugin._arona_client = SimpleNamespace(
+            get_guide_image=AsyncMock(
+                side_effect=[
+                    "https://example.test/hoshino.png",
+                    "https://example.test/swimsuit.png",
+                ]
+            ),
+            last_error=None,
+        )
         plugin._start_student_choice = AsyncMock(return_value=(True, "菜单"))
         event = SimpleNamespace(unified_msg_origin="", plain_result=lambda text: text)
 
         results = [result async for result in plugin._handle_guide(event, "星也")]
 
-        plugin._start_student_choice.assert_awaited_once_with(
-            event,
-            "星也",
-            candidates,
-            "cn",
-            query_mode="guide",
-            suggestions=True,
-            primary_name="星野",
-            recommendations=["日鞠"],
+        plugin._start_student_choice.assert_awaited_once()
+        call_args = plugin._start_student_choice.await_args
+        self.assertEqual(call_args.args[:2], (event, "星也"))
+        self.assertEqual(call_args.args[3], "cn")
+        self.assertEqual(call_args.kwargs["query_mode"], "guide")
+        self.assertTrue(call_args.kwargs["suggestions"])
+        self.assertEqual(call_args.kwargs["primary_name"], "星野")
+        self.assertEqual(call_args.kwargs["recommendations"], ["日鞠"])
+        menu_candidates = plugin._start_student_choice.await_args.args[2]
+        self.assertEqual(
+            [candidate["Name"] for candidate in menu_candidates],
+            ["星野", "星野（泳装）"],
         )
+        self.assertEqual(
+            [candidate["_arona_guide_url"] for candidate in menu_candidates],
+            [
+                "https://example.test/hoshino.png",
+                "https://example.test/swimsuit.png",
+            ],
+        )
+        self.assertTrue(menu_candidates.needs_confirmation)
         self.assertEqual(results, [])
 
     async def test_ambiguous_guide_search_starts_guide_candidate_menu(self):
@@ -479,33 +623,57 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
         plugin.config = {"basic_settings": {"student_data_language": "cn"}}
         candidates = [
             {"Id": 1, "Name": "爱丽丝"},
-            {"Id": 2, "Name": "爱丽丝（女仆）"},
+            {
+                "Id": 2,
+                "PathName": "aris_maid",
+                "Name": "爱丽丝（女仆）",
+            },
         ]
         plugin._schaledb_client = SimpleNamespace(
             search_student_candidates=AsyncMock(return_value=candidates)
+        )
+        plugin._arona_client = SimpleNamespace(
+            get_guide_image=AsyncMock(
+                side_effect=[
+                    "https://example.test/alice.png",
+                    "https://example.test/maid.png",
+                ]
+            ),
+            last_error=None,
         )
         plugin._start_student_choice = AsyncMock(return_value=(True, "菜单"))
         event = SimpleNamespace(unified_msg_origin="", plain_result=lambda text: text)
 
         results = [result async for result in plugin._handle_guide(event, "爱丽")]
 
-        plugin._start_student_choice.assert_awaited_once_with(
-            event,
-            "爱丽",
-            candidates,
-            "cn",
-            query_mode="guide",
-            suggestions=False,
-            primary_name="",
-            recommendations=[],
+        plugin._arona_client.get_guide_image.assert_has_awaits(
+            [call("爱丽丝"), call("女仆爱丽丝")]
         )
+        menu_args = plugin._start_student_choice.await_args.args
+        self.assertEqual(
+            [candidate["Name"] for candidate in menu_args[2]],
+            ["爱丽丝", "爱丽丝（女仆）"],
+        )
+        self.assertEqual(
+            [candidate["_arona_guide_name"] for candidate in menu_args[2]],
+            ["爱丽丝", "女仆爱丽丝"],
+        )
+        self.assertEqual(plugin._start_student_choice.await_args.kwargs["query_mode"], "guide")
         self.assertEqual(results, [])
 
     async def test_guide_candidate_selection_fetches_guide_without_repeating_search(self):
         plugin = BAToolbox.__new__(BAToolbox)
         choice = {
             "token": "guide-token",
-            "candidates": [{"Id": 1, "Name": "爱丽丝（女仆）"}],
+            "candidates": [
+                {
+                    "Id": 1,
+                    "PathName": "aris_maid",
+                    "Name": "爱丽丝（女仆）",
+                    "_arona_guide_name": "女仆爱丽丝",
+                    "_arona_guide_url": "https://example.test/maid.png",
+                }
+            ],
             "language": "cn",
             "query_mode": "guide",
         }
@@ -523,7 +691,7 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
             result async for result in plugin._finish_student_choice(event, choice, 0)
         ]
 
-        plugin._arona_client.get_guide_image.assert_awaited_once_with("爱丽丝（女仆）")
+        plugin._arona_client.get_guide_image.assert_not_awaited()
         self.assertEqual(results, [("image", "https://example.test/maid.png")])
 
     async def test_menu_trigger_sends_reactions_and_registers_active_menu(self):

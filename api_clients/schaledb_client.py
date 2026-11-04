@@ -76,6 +76,7 @@ class SchaleDBClient:
 
     API_BASE = "https://schaledb.com"
     LANGUAGES = {"cn", "jp", "en", "tw", "kr", "th", "vi"}
+    RELEASE_REGION_NAMES = ("日服", "国际服", "国服")
     VARIANT_LABELS = {
         "racing": "赛车",
         "swimsuit": "泳装",
@@ -558,6 +559,17 @@ class SchaleDBClient:
         return merge(latest, localized)
 
     @classmethod
+    def _released_regions(cls, student: dict[str, Any]) -> list[str] | None:
+        released = student.get("IsReleased")
+        if not isinstance(released, list):
+            return None
+        return [
+            region
+            for index, region in enumerate(cls.RELEASE_REGION_NAMES)
+            if index < len(released) and released[index] is True
+        ]
+
+    @classmethod
     def _localized_variant_name(
         cls,
         student: dict[str, Any],
@@ -984,6 +996,7 @@ class SchaleDBClient:
                     record["Name"] = variant_name
             record["_data_source_language"] = source_language
             record["_display_language"] = display_language
+            record["_released_regions"] = self._released_regions(source)
             return record
 
         ranked_identities = []

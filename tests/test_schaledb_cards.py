@@ -154,6 +154,47 @@ class GameKeeClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AronaClientTests(unittest.IsolatedAsyncioTestCase):
+    def test_schaledb_forms_map_to_confirmed_arona_catalog_names(self):
+        self.assertEqual(
+            AronaClient.guide_name_for_student(
+                {"PathName": "aris_maid", "Name": "爱丽丝（女仆）"}
+            ),
+            "女仆爱丽丝",
+        )
+        self.assertEqual(
+            AronaClient.guide_name_for_student(
+                {"PathName": "hifumi_racing", "Name": "ヒフミ（レーシング）"}
+            ),
+            "赛车日富美",
+        )
+        self.assertEqual(
+            AronaClient.guide_name_for_student(
+                {"PathName": "aris", "Name": "爱丽丝"}
+            ),
+            "爱丽丝",
+        )
+
+    def test_schaledb_parenthesized_forms_are_prefixed_for_arona(self):
+        self.assertEqual(
+            AronaClient.guide_name_for_student(
+                {"PathName": "azusa_swimsuit", "Name": "梓（泳装）"}
+            ),
+            "泳装梓",
+        )
+        self.assertEqual(
+            AronaClient.guide_name_for_student(
+                {"PathName": "haruka_newyear", "Name": "春香（新年）"}
+            ),
+            "正月春香",
+        )
+        self.assertEqual(
+            AronaClient.guide_name_for_student(
+                {"PathName": "aru_newyear", "Name": "爱露（新年）"},
+                {"新年": "和服"},
+            ),
+            "和服爱露",
+        )
+
     async def test_fuzzy_guide_matches_return_candidate_names_not_first_image(self):
         client = AronaClient()
         client._get_session = AsyncMock(
@@ -191,6 +232,42 @@ class AronaClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SchaleDBClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_candidate_region_labels_follow_is_released_not_locale_dataset(self):
+        language_records = []
+        for language, names in (
+            ("cn", ("日富美", "日富美（泳装）", "日富美（赛车）")),
+            ("en", ("Hifumi", "Hifumi (Swimsuit)", "Hifumi (Racing)")),
+            ("jp", ("ヒフミ", "ヒフミ（水着）", "ヒフミ（レーシング）")),
+        ):
+            language_records.append(
+                [
+                    {
+                        "Id": student_id,
+                        "Name": name,
+                        "PathName": path_name,
+                        "FamilyName": "Ajitani",
+                        "PersonalName": "Hifumi",
+                        "IsReleased": [True, True, True]
+                        if student_id != 10153
+                        else [True, False, False],
+                    }
+                    for student_id, path_name, name in zip(
+                        (10003, 20005, 10153),
+                        ("hifumi", "hifumi_swimsuit", "hifumi_racing"),
+                        names,
+                    )
+                ]
+            )
+
+        with TemporaryDirectory() as temp_dir:
+            client = SchaleDBClient(temp_dir)
+            client.get_students = AsyncMock(side_effect=language_records)
+            candidates = await client.search_student_candidates("日富美", "cn")
+
+        racing = next(item for item in candidates if item["Id"] == 10153)
+        self.assertEqual(racing["_data_source_language"], "cn")
+        self.assertEqual(racing["_released_regions"], ["日服"])
+
     async def test_dataset_json_is_loaded_once_into_memory_cache(self):
         with TemporaryDirectory() as temp_dir:
             client = SchaleDBClient(temp_dir)

@@ -8,6 +8,8 @@ Arona 攻略图客户端。
 
 from __future__ import annotations
 
+import re
+
 import aiohttp
 
 
@@ -20,6 +22,21 @@ class AronaClient:
 
     API_BASE = "https://arona.diyigemt.com/api/v2"
     CDN_PREFIX = "https://arona.cdn.diyigemt.com/image"
+    GUIDE_NAME_ALIASES = {
+        "aris_maid": "女仆爱丽丝",
+        "hifumi_racing": "赛车日富美",
+    }
+    GUIDE_FORM_ALIASES = {
+        "新年": "正月",
+        "武装": "临战",
+        "邦妮": "兔女郎",
+        "运动服": "体操服",
+        "自行车": "骑行",
+        "单车": "骑行",
+        "野营": "露营",
+        "魔法少女": "魔法",
+        "レーシング": "赛车",
+    }
 
     HEADERS = {
         "Accept": "application/json, text/plain, */*",
@@ -64,6 +81,27 @@ class AronaClient:
         if remaining > 0:
             shown += f" 等 {len(names)} 项"
         return f"候选：{shown}。"
+
+    @classmethod
+    def guide_name_for_student(
+        cls,
+        student: dict,
+        form_aliases: dict[str, str] | None = None,
+    ) -> str:
+        """Return the Arona catalog name for a SchaleDB student record."""
+        path_name = str(student.get("PathName") or "").strip().lower()
+        if path_name in cls.GUIDE_NAME_ALIASES:
+            return cls.GUIDE_NAME_ALIASES[path_name]
+
+        name = str(student.get("Name") or student.get("PathName") or "").strip()
+        match = re.fullmatch(r"(.+?)[（(]([^（）()]+)[）)]", name)
+        if not match:
+            return name
+
+        base_name, form_name = match.groups()
+        aliases = cls.GUIDE_FORM_ALIASES if form_aliases is None else form_aliases
+        form_name = aliases.get(form_name, form_name)
+        return f"{form_name}{base_name}"
 
     async def get_guide_image(self, name: str) -> str | None:
         """查询学生攻略图片 URL。

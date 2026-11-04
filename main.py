@@ -32,6 +32,7 @@ from .api_clients.gamekee import GameKeeClient
 from .api_clients.schaledb_client import (
     SchaleDBClient,
     SchaleDBError,
+    StudentCandidateMatches,
 )
 from .poll_archive import PollArchive
 from .renderers.card import (
@@ -691,6 +692,26 @@ class BAToolbox(Star):
                 aliases[alias] = canonical
         return aliases
 
+    def _arona_form_aliases(self) -> dict[str, str]:
+        settings = self._student_search_settings()
+        if "arona_form_aliases" not in settings:
+            return dict(AronaClient.GUIDE_FORM_ALIASES)
+
+        configured = settings.get("arona_form_aliases")
+        if isinstance(configured, str):
+            configured = configured.splitlines()
+        if not isinstance(configured, (list, tuple)):
+            return {}
+
+        aliases = {}
+        for item in configured:
+            if not isinstance(item, str) or "=" not in item:
+                continue
+            form_name, arona_name = (part.strip() for part in item.split("=", 1))
+            if form_name and arona_name:
+                aliases[form_name] = arona_name
+        return aliases
+
     def _student_llm_enabled(self) -> bool:
         return self._student_search_settings().get("llm_enabled") is True
 
@@ -816,8 +837,16 @@ class BAToolbox(Star):
             return
         student = choice["candidates"][action]
         if choice.get("query_mode") == "guide":
+            guide_name = str(
+                student.get("_arona_guide_name")
+                or AronaClient.guide_name_for_student(
+                    student, self._arona_form_aliases()
+                )
+            )
             results = self._fetch_guide_image(
-                event, str(student.get("Name") or student.get("PathName") or "")
+                event,
+                guide_name,
+                str(student.get("_arona_guide_url") or "") or None,
             )
         else:
             results = self._render_student_detail(event, student, choice["language"])
@@ -986,6 +1015,20 @@ class BAToolbox(Star):
                 labels[index] = f"{label}（{detail}）"
         return labels
 
+    @staticmethod
+    def _student_release_label(student: dict[str, Any]) -> str:
+        released_regions = student.get("_released_regions")
+        if not isinstance(released_regions, list):
+            source_names = {"cn": "国服数据", "en": "国际服数据", "jp": "日服数据"}
+            return source_names.get(
+                student.get("_data_source_language"), "其他数据"
+            )
+        if len(released_regions) == len(SchaleDBClient.RELEASE_REGION_NAMES):
+            return "全服"
+        if released_regions:
+            return f"{'、'.join(released_regions)}实装"
+        return "未实装"
+
     async def _start_student_choice(
         self,
         event: AstrMessageEvent,
@@ -1061,12 +1104,12 @@ class BAToolbox(Star):
             lines = [
                 f"「{query}」最接近「{primary_name}」，以下是该学生的形态，请选择："
             ]
-        source_names = {"cn": "国服", "en": "国际服", "jp": "日服"}
         for index, (student, label) in enumerate(
             zip(shown_candidates, labels), start=1
         ):
-            source = source_names.get(student.get("_data_source_language"), "其他")
-            lines.append(f"{index}. {label}（{source}数据）")
+            lines.append(
+                f"{index}. {label}（{self._student_release_label(student)}）"
+            )
         if recommendations:
             lines.append(
                 "其他相似角色（如不是你要找的角色，可重新查询）："
@@ -1951,11 +1994,21 @@ class BAToolbox(Star):
             yield event.plain_result(f"攻略学生名称匹配失败：{exc}")
             return
 
+        try:
+            guide_candidates = await self._resolve_guide_candidates(candidates)
+        except Exception as exc:
+            self._log_error("guide", "guide candidate lookup failed", error=exc)
+            yield event.plain_result("获取攻略失败，请稍后重试。")
+            return
+        if not guide_candidates:
+            yield event.plain_result(f"未找到学生「{name}」或其形态的攻略图。")
+            return
+
         if len(candidates) > 1 or getattr(candidates, "needs_confirmation", False):
             sent, prompt = await self._start_student_choice(
                 event,
                 name,
-                candidates,
+                guide_candidates,
                 language,
                 query_mode="guide",
                 suggestions=getattr(candidates, "needs_confirmation", False),
@@ -1972,13 +2025,58 @@ class BAToolbox(Star):
                 f"已匹配「{getattr(candidates, 'primary_name', '')}」；"
                 f"其他相似角色：{'、'.join(recommendations)}"
             )
-        student_name = str(
-            candidates[0].get("Name") or candidates[0].get("PathName") or name
-        )
-        async for result in self._fetch_guide_image(event, student_name):
+        student = guide_candidates[0]
+        guide_name = str(student.get("_arona_guide_name") or "")
+        guide_url = str(student.get("_arona_guide_url") or "")
+        async for result in self._fetch_guide_image(event, guide_name, guide_url):
             yield result
 
-    async def _fetch_guide_image(self, event: AstrMessageEvent, name: str):
+    async def _resolve_guide_candidates(
+        self, candidates: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        guide_candidates = []
+        for student in candidates:
+            guide_name = AronaClient.guide_name_for_student(
+                student, self._arona_form_aliases()
+            )
+            if not guide_name:
+                continue
+            try:
+                guide_url = await self.arona.get_guide_image(guide_name)
+            except AronaAmbiguousError:
+                continue
+            if self.arona.last_error:
+                raise RuntimeError(self.arona.last_error)
+            if not guide_url:
+                continue
+            guide_candidate = dict(student)
+            guide_candidate["_arona_guide_name"] = guide_name
+            guide_candidate["_arona_guide_url"] = guide_url
+            guide_candidates.append(guide_candidate)
+
+        if isinstance(candidates, StudentCandidateMatches):
+            return StudentCandidateMatches(
+                guide_candidates,
+                primary_name=candidates.primary_name,
+                recommendations=candidates.recommendations,
+                needs_confirmation=candidates.needs_confirmation,
+                ranked_identities=candidates.ranked_identities,
+                variant_terms=candidates.variant_terms,
+                variant_terms_by_id=candidates.variant_terms_by_id,
+                base_student_ids=candidates.base_student_ids,
+            )
+        return guide_candidates
+
+    async def _fetch_guide_image(
+        self,
+        event: AstrMessageEvent,
+        name: str,
+        guide_url: str | None = None,
+    ):
+        if guide_url:
+            yield event.image_result(guide_url)
+            return
+
         try:
             guide_url = await self.arona.get_guide_image(name)
         except AronaAmbiguousError as exc:
