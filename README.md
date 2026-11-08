@@ -155,7 +155,7 @@ git clone https://github.com/DearCrazyLeaf/astrbot_plugin_bluearchive_toolbox
 ```
 
 >[!NOTE]
->首次启动时插件会检查 Playwright Chromium；若缺失则会使用 AstrBot 当前 Python 环境中的 Playwright 自动安装匹配的浏览器版本。若渲染时仍遇到浏览器可执行文件缺失，插件还会尝试安装并重试一次；安装需要网络连接和浏览器缓存目录的写入权限；失败原因及使用当前 Python 手动安装的命令会记录在 AstrBot 后台日志中
+>首次启动时插件会检查 Playwright Chromium；若缺失则会使用 AstrBot 当前 Python 环境中的 Playwright 自动安装匹配的浏览器版本，若安装失败，或后续渲染时仍缺少浏览器可执行文件，插件会在后台日志中说明原因和手动安装命令
 
 ## ⚙️ 配置 | Configuration
 
@@ -243,7 +243,7 @@ AstrBot WebUI -> 插件 -> BA 工具箱 -> 插件配置
 
 ## 🛠️ 问题排查 | Troubleshooting
 
-- **卡片渲染失败**：确认 AstrBot 运行环境可访问网络并能写入 Playwright 浏览器缓存目录。插件会用当前 Playwright 包所需的 revision 自动安装 Chromium；不要手动替换 revision 目录。若需手动安装，请使用日志提供的命令，确保使用 AstrBot 实际运行的同一个 Python 环境
+- **卡片渲染失败**：插件只在启动时检查并尝试安装 Chromium；渲使染阶段若仍找不到浏览器，会在日志中输出手动安装命令
 - **查询数据失败**：确认运行环境可访问相应数据源；需要镜像时，在插件配置中填写 `api_base_url` 或 `schaledb_base_url`
 - **学生名称未匹配**：详情和攻略查询会跨国服、国际服和日服数据搜索；可输入部分名称，或尝试版本名，例如 `日富美（赛车）` 出现多个候选时，群内任何人都可点击候选表情查询；发起者也可回复对应候选菜单输入序号；每群并发上限和过期时间可在 `menu_settings` 中配置
 - **中文字符显示不全**：默认使用精简字体；可启用 `download_full_font` 让插件尝试下载完整字体；无法访问上游时可关闭该选项并使用内置字体

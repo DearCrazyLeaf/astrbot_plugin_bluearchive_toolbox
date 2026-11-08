@@ -72,29 +72,29 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotEqual(render_thread, event_loop_thread)
 
-    async def test_card_render_repairs_missing_playwright_executable_once(self):
-        calls = 0
-
+    async def test_card_render_logs_install_hint_without_installing(self):
         def render():
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise RuntimeError(
-                    "BrowserType.launch: Executable doesn't exist at "
-                    "chromium_headless_shell-expected"
-                )
-            return b"rendered"
+            raise RuntimeError(
+                "BrowserType.launch: Executable doesn't exist at "
+                "chromium_headless_shell-expected"
+            )
 
-        with patch.object(
-            self.plugin,
-            "_ensure_playwright_chromium",
-            new_callable=AsyncMock,
-        ) as install:
-            result = await self.plugin._render_in_thread(render)
+        with (
+            patch.object(
+                self.plugin,
+                "_ensure_playwright_chromium",
+                new_callable=AsyncMock,
+            ) as install,
+            patch.object(main_module.logger, "error") as error_log,
+            self.assertRaisesRegex(RuntimeError, "Executable doesn't exist"),
+        ):
+            await self.plugin._render_in_thread(render)
 
-        self.assertEqual(result, b"rendered")
-        self.assertEqual(calls, 2)
-        install.assert_awaited_once()
+        install.assert_not_awaited()
+        self.assertIn(
+            f"{main_module.sys.executable} -m playwright install chromium",
+            error_log.call_args.args[0],
+        )
 
     async def test_card_render_does_not_repair_other_playwright_errors(self):
         def render():
@@ -106,11 +106,13 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
                 "_ensure_playwright_chromium",
                 new_callable=AsyncMock,
             ) as install,
+            patch.object(main_module.logger, "error") as error_log,
             self.assertRaisesRegex(RuntimeError, "Browser closed unexpectedly"),
         ):
             await self.plugin._render_in_thread(render)
 
         install.assert_not_awaited()
+        error_log.assert_not_called()
 
     async def test_playwright_chromium_is_installed_when_missing(self):
         with (

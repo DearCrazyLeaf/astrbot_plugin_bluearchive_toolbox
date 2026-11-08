@@ -2,22 +2,16 @@
 
 本文档记录 `astrbot_plugin_bluearchive_toolbox` 的版本变更
 
+## v1.0.9
+
+### 修复
+- 移除卡片渲染失败时自动安装 `Chromium` 并重试的行为：缺少浏览器时记录错误和手动安装命令
+
 ## v1.0.8
 
 ### 优化
 - 当框架未启用 `是否忽略机器人自身的消息` 时，调用互动菜单可能会直接触发菜单内容，现在已将菜单冷却提升至5s，并添加可配置项修改保护期长度
 - 新增 `event.get_self_id()` 强制忽略机器人自身ID，配合不能开启 `是否忽略机器人自身的消息` 的情景
-
-## v1.0.7
-
-### 优化
-- 当 Astrbot 内置 Playwright 和环境的不一致时，自动下载的 Chromium 可能会因为版本不对而调用失败，现在插件会根据期望的版本自动安装需要的版本
-
-> [!NOTE]
-> 如果依旧失败请在框架运行的机器上执行
->  1. `python -m pip install --upgrade playwright`
->  2. `python -m playwright install chromium` 
-> 尝试手动匹配版本
 
 ## v1.0.6
 

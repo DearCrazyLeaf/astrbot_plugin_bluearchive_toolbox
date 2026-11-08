@@ -351,15 +351,14 @@ class BAToolbox(Star):
         try:
             return await asyncio.to_thread(render, *args)
         except Exception as exc:
-            if not self._is_missing_playwright_executable(exc):
-                raise
-
-            logger.warning(
-                f"{LOG_PREFIX}[renderer] Chromium 可执行文件缺失，"
-                "尝试安装当前 Playwright 版本所需的浏览器并重试"
-            )
-            await self._ensure_playwright_chromium()
-            return await asyncio.to_thread(render, *args)
+            if self._is_missing_playwright_executable(exc):
+                logger.error(
+                    f"{LOG_PREFIX}[renderer] Chromium 可执行文件缺失，"
+                    "不会在渲染过程中自动安装或重试；"
+                    f"请在 AstrBot 运行环境中手动执行 "
+                    f"`{sys.executable} -m playwright install chromium`：{exc}"
+                )
+            raise
 
     async def _poll_loop(self) -> None:
         while True:
