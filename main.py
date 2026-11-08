@@ -200,36 +200,42 @@ class BAToolbox(Star):
             )
 
     async def _ensure_playwright_chromium(self) -> None:
-        if await asyncio.to_thread(is_chromium_installed):
-            logger.info(f"{LOG_PREFIX}[renderer] Playwright Chromium 已安装")
-            return
+        install_lock = getattr(self, "_playwright_install_lock", None)
+        if install_lock is None:
+            install_lock = asyncio.Lock()
+            self._playwright_install_lock = install_lock
 
-        logger.info(
-            f"{LOG_PREFIX}[renderer] 未检测到 Playwright Chromium，正在自动安装"
-        )
-        result = await asyncio.to_thread(
-            subprocess.run,
-            [
-                sys.executable,
-                "-m",
-                "playwright",
-                "install",
-                "chromium",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=900,
-            check=False,
-        )
-        if result.returncode:
-            details = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(
-                f"安装命令退出码 {result.returncode}"
-                + (f"：{details[-2000:]}" if details else "")
+        async with install_lock:
+            if await asyncio.to_thread(is_chromium_installed):
+                logger.info(f"{LOG_PREFIX}[renderer] Playwright Chromium 已安装")
+                return
+
+            logger.info(
+                f"{LOG_PREFIX}[renderer] 未检测到 Playwright Chromium，正在自动安装"
             )
-        if not await asyncio.to_thread(is_chromium_installed):
-            raise RuntimeError("安装命令已结束，但仍未找到 Chromium 可执行文件")
-        logger.info(f"{LOG_PREFIX}[renderer] Playwright Chromium 自动安装完成")
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    sys.executable,
+                    "-m",
+                    "playwright",
+                    "install",
+                    "chromium",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=900,
+                check=False,
+            )
+            if result.returncode:
+                details = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(
+                    f"安装命令退出码 {result.returncode}"
+                    + (f"：{details[-2000:]}" if details else "")
+                )
+            if not await asyncio.to_thread(is_chromium_installed):
+                raise RuntimeError("安装命令已结束，但仍未找到 Chromium 可执行文件")
+            logger.info(f"{LOG_PREFIX}[renderer] Playwright Chromium 自动安装完成")
 
     async def terminate(self) -> None:
         if self._poll_task and not self._poll_task.done():
@@ -336,8 +342,24 @@ class BAToolbox(Star):
         return results
 
     @staticmethod
-    async def _render_in_thread(render: Callable[..., bytes], *args: Any) -> bytes:
-        return await asyncio.to_thread(render, *args)
+    def _is_missing_playwright_executable(error: Exception) -> bool:
+        return "executable doesn't exist" in str(error).casefold()
+
+    async def _render_in_thread(
+        self, render: Callable[..., bytes], *args: Any
+    ) -> bytes:
+        try:
+            return await asyncio.to_thread(render, *args)
+        except Exception as exc:
+            if not self._is_missing_playwright_executable(exc):
+                raise
+
+            logger.warning(
+                f"{LOG_PREFIX}[renderer] Chromium 可执行文件缺失，"
+                "尝试安装当前 Playwright 版本所需的浏览器并重试"
+            )
+            await self._ensure_playwright_chromium()
+            return await asyncio.to_thread(render, *args)
 
     async def _poll_loop(self) -> None:
         while True:

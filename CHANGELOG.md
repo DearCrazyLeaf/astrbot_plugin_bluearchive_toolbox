@@ -2,6 +2,17 @@
 
 本文档记录 `astrbot_plugin_bluearchive_toolbox` 的版本变更
 
+## v1.0.7
+
+### 优化
+- 当 Astrbot 内置 Playwright 和环境的不一致时，自动下载的 Chromium 可能会因为版本不对而调用失败，现在插件会根据期望的版本自动安装需要的版本
+
+> [!NOTE]
+> 如果依旧失败请在框架运行的机器上执行
+>  1. `python -m pip install --upgrade playwright`
+>  2. `python -m playwright install chromium` 
+> 尝试手动匹配版本
+
 ## v1.0.6
 
 ### 优化

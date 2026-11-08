@@ -72,6 +72,46 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotEqual(render_thread, event_loop_thread)
 
+    async def test_card_render_repairs_missing_playwright_executable_once(self):
+        calls = 0
+
+        def render():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError(
+                    "BrowserType.launch: Executable doesn't exist at "
+                    "chromium_headless_shell-expected"
+                )
+            return b"rendered"
+
+        with patch.object(
+            self.plugin,
+            "_ensure_playwright_chromium",
+            new_callable=AsyncMock,
+        ) as install:
+            result = await self.plugin._render_in_thread(render)
+
+        self.assertEqual(result, b"rendered")
+        self.assertEqual(calls, 2)
+        install.assert_awaited_once()
+
+    async def test_card_render_does_not_repair_other_playwright_errors(self):
+        def render():
+            raise RuntimeError("Browser closed unexpectedly")
+
+        with (
+            patch.object(
+                self.plugin,
+                "_ensure_playwright_chromium",
+                new_callable=AsyncMock,
+            ) as install,
+            self.assertRaisesRegex(RuntimeError, "Browser closed unexpectedly"),
+        ):
+            await self.plugin._render_in_thread(render)
+
+        install.assert_not_awaited()
+
     async def test_playwright_chromium_is_installed_when_missing(self):
         with (
             patch.object(
