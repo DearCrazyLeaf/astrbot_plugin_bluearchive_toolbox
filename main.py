@@ -690,6 +690,15 @@ class BAToolbox(Star):
         settings = self.config.get("menu_settings", {})
         return settings if isinstance(settings, dict) else {}
 
+    def _reaction_warmup_seconds(self) -> float:
+        try:
+            return max(
+                0.0,
+                float(self._menu_settings().get("reaction_warmup_seconds", 5)),
+            )
+        except (TypeError, ValueError):
+            return 5.0
+
     def _legacy_student_choice_settings(self) -> dict[str, Any]:
         settings = self.config.get("student_choice_settings", {})
         return settings if isinstance(settings, dict) else {}
@@ -1429,6 +1438,15 @@ class BAToolbox(Star):
             or raw.get("qq")
             or ""
         )
+        get_self_id = getattr(event, "get_self_id", None)
+        self_id = (
+            str(get_self_id() or "")
+            if callable(get_self_id)
+            else str(getattr(event, "self_id", "") or "")
+        )
+        if self_id and clicker_id == self_id:
+            self._stop_menu_event(event)
+            return True
         face_id = str(raw.get("face_id") or raw.get("emoji_id") or "")
         if not face_id and isinstance(raw.get("likes"), list) and raw["likes"]:
             first = raw["likes"][0]
@@ -1444,7 +1462,10 @@ class BAToolbox(Star):
             if time.time() - choice["created_at"] > choice["timeout_seconds"]:
                 self._close_student_choice(choice["token"])
                 return True
-            if time.time() - choice["created_at"] < 1.5:
+            if (
+                time.time() - choice["created_at"]
+                < self._reaction_warmup_seconds()
+            ):
                 return True
             action = choice["emoji_map"].get(face_id)
             if action is None:
@@ -1480,7 +1501,7 @@ class BAToolbox(Star):
         ):
             self._active_menus.pop(message_id, None)
             return False
-        if time.time() - menu["created_at"] < 1.5:
+        if time.time() - menu["created_at"] < self._reaction_warmup_seconds():
             return True
         face_item = menu["emoji_map"].get(face_id)
         if face_item is None:

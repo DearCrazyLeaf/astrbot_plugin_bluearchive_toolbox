@@ -174,7 +174,14 @@
             "debounce_seconds": {
                 "description": "表情点击防抖间隔（秒）",
                 "type": "int",
-                "default": 3
+                "default": 3,
+                "hint": "控制单个表情多少秒内不能重复点击，防止刷屏"
+            },
+            "reaction_warmup_seconds": {
+                "description": "菜单表情响应冷却时间（秒）",
+                "type": "int",
+                "default": 5,
+                "hint": "菜单发送后此时间内忽略所有人的表情点击，避免机器人刚添加表情时被当作选择；回复菜单的序号/名称和普通命令不受影响；机器人自身的表情事件会始终忽略"
             },
             "menu_repeat_block": {
                 "description": "是否阻止重复发送菜单",

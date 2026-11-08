@@ -767,7 +767,7 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._active_menus = {
             "menu-message": {
                 "group_id": "123456",
-                "created_at": time.time() - 3,
+                "created_at": time.time() - 6,
                 "items": [],
                 "emoji_map": {"14": {"label": "学生生日", "command": "生日"}},
             }
@@ -1272,7 +1272,7 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_candidate_reaction_dispatches_selection_from_any_user(self):
         choice = {
             "token": "candidate-token",
-            "created_at": time.time() - 3,
+            "created_at": time.time() - 6,
             "timeout_seconds": 120,
             "user_id": "789",
             "group_id": "123456",
@@ -1310,6 +1310,66 @@ class CommandRoutingTests(unittest.IsolatedAsyncioTestCase):
                 "_ba_student_choice_actor_id": "456",
             },
         )
+
+    async def test_candidate_reaction_is_ignored_during_configured_warmup(self):
+        choice = {
+            "token": "candidate-token",
+            "created_at": time.time() - 3,
+            "timeout_seconds": 120,
+            "user_id": "789",
+            "group_id": "123456",
+            "message_id": "candidate-menu",
+            "emoji_map": {"14": 0},
+            "candidates": [{"Id": 1, "Name": "Alice"}],
+            "labels": ["Alice"],
+            "language": "cn",
+        }
+        self.plugin._pending_student_queries[choice["token"]] = choice
+        self.plugin._student_candidate_menus[choice["message_id"]] = choice
+        self.plugin._execute_menu_command = AsyncMock(return_value=True)
+        self.plugin._stop_menu_event = lambda _event: None
+        event = SimpleNamespace()
+        raw = {
+            "notice_type": "group_msg_emoji_like",
+            "message_id": "candidate-menu",
+            "user_id": "456",
+            "emoji_id": "14",
+        }
+
+        handled = await self.plugin._handle_menu_reaction(event, raw)
+
+        self.assertTrue(handled)
+        self.plugin._execute_menu_command.assert_not_awaited()
+
+    async def test_candidate_reaction_from_bot_is_always_ignored(self):
+        choice = {
+            "token": "candidate-token",
+            "created_at": time.time() - 10,
+            "timeout_seconds": 120,
+            "user_id": "789",
+            "group_id": "123456",
+            "message_id": "candidate-menu",
+            "emoji_map": {"14": 0},
+            "candidates": [{"Id": 1, "Name": "Alice"}],
+            "labels": ["Alice"],
+            "language": "cn",
+        }
+        self.plugin._pending_student_queries[choice["token"]] = choice
+        self.plugin._student_candidate_menus[choice["message_id"]] = choice
+        self.plugin._execute_menu_command = AsyncMock(return_value=True)
+        self.plugin._stop_menu_event = lambda _event: None
+        event = SimpleNamespace(get_self_id=lambda: "bot-1")
+        raw = {
+            "notice_type": "group_msg_emoji_like",
+            "message_id": "candidate-menu",
+            "user_id": "bot-1",
+            "emoji_id": "14",
+        }
+
+        handled = await self.plugin._handle_menu_reaction(event, raw)
+
+        self.assertTrue(handled)
+        self.plugin._execute_menu_command.assert_not_awaited()
 
 
 if __name__ == "__main__":

@@ -209,7 +209,7 @@ AstrBot WebUI -> 插件 -> BA 工具箱 -> 插件配置
 - 详情查询生成学生资料卡，攻略查询先从 SchaleDB 匹配学生，再将选中的名称交给现有攻略图片接口查询
 
 - 详情或攻略名称匹配到多个候选时，群聊会显示互动候选菜单；群内任何人都可点击表情查询候选，查询发起者可回复对应菜单并输入序号/候选名称；选择候选后菜单继续有效，可重复选择；点击“取消查询”后关闭
-- 回应菜单和学生候选菜单的配置都集中在 `menu_settings`：两种菜单共用分隔线；学生候选菜单的标题、底部说明、有效期、每群并发上限和专用表情池分别由 `student_choice_title`、`student_choice_footer_text`、`student_choice_timeout_seconds`、`student_choice_max_active_menus`、`student_choice_face_pool` 控制。说明和专用表情池留空时分别不显示、沿用通用表情池
+- 回应菜单和学生候选菜单的配置都集中在 `menu_settings`：两种菜单共用分隔线；学生候选菜单的标题、底部说明、有效期、每群并发上限和专用表情池分别由 `student_choice_title`、`student_choice_footer_text`、`student_choice_timeout_seconds`、`student_choice_max_active_menus`、`student_choice_face_pool` 控制。`reaction_warmup_seconds` 控制菜单发送后的表情冷却时间，默认 5 秒；冷却期间所有人的表情点击都会被忽略，但回复菜单序号/名称和普通命令仍可使用。机器人自己的表情事件始终忽略。说明和专用表情池留空时分别不显示、沿用通用表情池
 
 - 学生候选菜单默认有效 120 秒、每群最多 3 个；达到上限时保留现有菜单并拒绝创建新菜单
 
